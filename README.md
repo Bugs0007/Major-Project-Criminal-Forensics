@@ -12,6 +12,7 @@ A Django REST API application for face recognition and matching in criminal fore
 ## Project Overview
 
 ### Technology Stack
+
 - **Backend Framework**: Django REST Framework (Python)
 - **Database**: PostgreSQL
 - **Image Storage**: AWS S3 (Amazon Simple Storage Service)
@@ -19,6 +20,7 @@ A Django REST API application for face recognition and matching in criminal fore
 - **API Format**: RESTful JSON API
 
 ### Key Components
+
 - **Database Layer**: PostgreSQL stores face metadata and 128-dimensional face encodings
 - **Storage Layer**: AWS S3 stores actual face images
 - **Processing Layer**: face_recognition library extracts and compares facial features
@@ -38,21 +40,22 @@ The system follows a three-tier architecture:
 
 The system uses a single main database table to store all face-related information:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| **id** | Integer (Primary Key) | Unique identifier for each face record |
-| **image_url** | URL (500 chars) | Link to the image stored in AWS S3 |
-| **original_filename** | String (255 chars) | Original filename of the uploaded image |
-| **encoding** | Text (JSON) | 128-dimensional face encoding (unique facial feature vector) |
-| **name** | String (255 chars, Optional) | Name of the person in the image |
-| **tags** | JSON Array | Labels for categorization (e.g., ["suspect", "wanted"]) |
-| **notes** | Text (Optional) | Additional information about the person |
-| **uploaded_at** | DateTime | Automatic timestamp when record is created |
-| **updated_at** | DateTime | Automatic timestamp when record is modified |
+| Column                | Type                         | Description                                                  |
+| --------------------- | ---------------------------- | ------------------------------------------------------------ |
+| **id**                | Integer (Primary Key)        | Unique identifier for each face record                       |
+| **image_url**         | URL (500 chars)              | Link to the image stored in AWS S3                           |
+| **original_filename** | String (255 chars)           | Original filename of the uploaded image                      |
+| **encoding**          | Text (JSON)                  | 128-dimensional face encoding (unique facial feature vector) |
+| **name**              | String (255 chars, Optional) | Name of the person in the image                              |
+| **tags**              | JSON Array                   | Labels for categorization (e.g., ["suspect", "wanted"])      |
+| **notes**             | Text (Optional)              | Additional information about the person                      |
+| **uploaded_at**       | DateTime                     | Automatic timestamp when record is created                   |
+| **updated_at**        | DateTime                     | Automatic timestamp when record is modified                  |
 
 ### What is Face Encoding?
 
 A **face encoding** is a mathematical representation of a person's unique facial features. The face_recognition library:
+
 1. Detects the face in the image
 2. Extracts key facial landmarks (eyes, nose, mouth, face shape, etc.)
 3. Converts these features into a 128-dimensional vector (128 numbers)
@@ -73,6 +76,7 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 **Purpose:** Upload a face image, extract its facial features (encoding), and store in the database.
 
 **What happens:**
+
 1. Receives an image file from the user
 2. Detects if there's a face in the image
 3. Extracts the 128-dimensional face encoding
@@ -80,6 +84,7 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 5. Stores the encoding and metadata in PostgreSQL database
 
 **Input Parameters:**
+
 - `image` (Required) - The image file containing a face
 - `name` (Optional) - Person's name
 - `tags` (Optional) - Categories like "suspect", "wanted", "missing"
@@ -98,6 +103,7 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 **Purpose:** Upload a photo and find all matching faces in the database based on facial similarity.
 
 **What happens:**
+
 1. Receives a search image
 2. Extracts the face encoding from the search image
 3. Compares it with all stored face encodings in the database
@@ -105,11 +111,13 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 5. Returns matches sorted by highest similarity first
 
 **Input Parameters:**
+
 - `image` (Required) - The image to search for
 - `min_similarity` (Optional) - Minimum match percentage (0-100, default: 0)
 - `max_results` (Optional) - Maximum number of results to return (1-50, default: 10)
 
 **Response:** Returns a list of matching faces with:
+
 - Similarity percentage
 - Person's name (if available)
 - Tags and notes
@@ -127,12 +135,14 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 **Purpose:** Retrieve all face records stored in the database.
 
 **What happens:**
+
 1. Queries the database for all face records
 2. Returns them in reverse chronological order (newest first)
 
 **Input Parameters:** None
 
 **Response:** Returns:
+
 - Total count of faces in the database
 - Complete details of all stored faces
 
@@ -147,11 +157,13 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 **Purpose:** Remove a face record from the database.
 
 **What happens:**
+
 1. Finds the face record by ID
 2. Deletes it from the database
 3. Image remains in S3 storage (for audit trail)
 
 **Input Parameters:**
+
 - `face_id` - The ID of the face to delete
 
 **Response Success:** Confirmation message
@@ -169,6 +181,7 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 **Purpose:** Verify the API is running and database is connected.
 
 **What happens:**
+
 1. Checks API server status
 2. Verifies database connection
 3. Returns total count of faces
@@ -176,6 +189,7 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 **Input Parameters:** None
 
 **Response:** Returns:
+
 - API status (healthy/unhealthy)
 - Database connection status
 - Total faces in database
