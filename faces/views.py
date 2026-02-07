@@ -16,6 +16,18 @@ from .utils import (
     calculate_similarity,
     resize_image_if_needed
 )
+from .sketch_utils import (
+    SketchGenerator, 
+    FaceFeatureComposer,
+    pil_to_cv2,
+    cv2_to_pil,
+    convert_sketch_to_3channel
+)
+from PIL import Image
+from .gan_enhancer import get_gan_enhancer
+from django.conf import settings
+import io
+import os
 
 
 @api_view(['POST'])
@@ -213,3 +225,232 @@ def health_check(request):
         },
         status=status.HTTP_200_OK
     )
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+def image_to_sketch(request):
+    """
+    Convert uploaded image to sketch
+    """
+    if 'image' not in request.FILES:
+        return Response(
+            {'error': 'No image provided'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    image_file = request.FILES['image']
+    sketch_method = request.data.get('method', 'adaptive')  # pencil, edge, adaptive
+    enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
+    
+    try:
+        # Load image
+        image = Image.open(image_file)
+        image_cv = pil_to_cv2(image)
+        
+        # Check if image is blurry and preprocess
+        is_blurry = request.data.get('is_blurry', 'false').lower() == 'true'
+        if is_blurry:
+            image_cv = SketchGenerator.preprocess_blurry_image(image_cv)
+        
+        # Generate sketch based on method
+        if sketch_method == 'pencil':
+            sketch = SketchGenerator.image_to_sketch_pencil(image_cv)
+        elif sketch_method == 'edge':
+            sketch = SketchGenerator.image_to_sketch_edge(image_cv)
+        else:  # adaptive (default)
+            sketch = SketchGenerator.image_to_sketch_adaptive(image_cv)
+        
+        # Enhance sketch
+        sketch = SketchGenerator.enhance_sketch(sketch)
+        
+        # Optional GAN enhancement
+        if enhance_with_gan:
+            gan_enhancer = get_gan_enhancer()
+            sketch = gan_enhancer.enhance_sketch(sketch)
+        
+        # Convert to 3-channel for face recognition compatibility
+        sketch_3ch = convert_sketch_to_3channel(sketch)
+        
+        # Convert to PIL
+        sketch_pil = cv2_to_pil(sketch)
+        
+        # Save to bytes
+        img_byte_arr = io.BytesIO()
+        sketch_pil.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        # Get image bytes before creating InMemoryUploadedFile
+        img_bytes = img_byte_arr.getvalue()
+        img_byte_arr.seek(0)
+        
+        # Upload to S3
+        from django.core.files.uploadedfile import InMemoryUploadedFile
+        sketch_file = InMemoryUploadedFile(
+            io.BytesIO(img_bytes),
+            None,
+            f"sketch_{image_file.name}",
+            'image/png',
+            len(img_bytes),
+            None
+        )
+        sketch_file.content_type = 'image/png'
+        
+        sketch_url, filename = upload_to_s3(sketch_file, f"sketches/{sketch_file.name}")
+        
+        # Optionally get face encoding for immediate search
+        encoding = None
+        if request.data.get('get_encoding', 'false').lower() == 'true':
+            encoding_array = get_face_encoding(io.BytesIO(img_bytes))
+            if encoding_array is not None:
+                encoding = encoding_array.tolist()
+        
+        return Response(
+            {
+                'sketch_url': sketch_url,
+                'original_filename': image_file.name,
+                'method': sketch_method,
+                'gan_enhanced': enhance_with_gan,
+                'encoding': encoding
+            },
+            status=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+def compose_face_from_features(request):
+    """
+    Compose face from selected features
+    """
+    try:
+        selected_features = request.data.get('features', {})
+        
+        if not selected_features:
+            return Response(
+                {'error': 'No features provided'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Load feature images from paths or IDs
+        feature_images = {}
+        for feature_type, feature_id in selected_features.items():
+            # In production, load from S3 or local storage
+            # For now, we'll use procedurally generated features
+            feature_path = f"features/{feature_type}/{feature_id}.png"
+            
+            # TODO: Load actual feature image
+            # feature_images[feature_type] = cv2.imread(feature_path, cv2.IMREAD_UNCHANGED)
+        
+        # Compose face
+        composed_face = FaceFeatureComposer.compose_face(feature_images)
+        
+        # Convert to sketch style
+        sketch = SketchGenerator.image_to_sketch_adaptive(composed_face)
+        
+        # Optional GAN enhancement
+        enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
+        if enhance_with_gan:
+            gan_enhancer = get_gan_enhancer()
+            sketch = gan_enhancer.enhance_sketch(sketch)
+        
+        # Convert to PIL
+        sketch_pil = cv2_to_pil(sketch)
+        
+        # Save to bytes
+        img_byte_arr = io.BytesIO()
+        sketch_pil.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        # Upload to S3
+        from django.core.files.uploadedfile import InMemoryUploadedFile
+        sketch_file = InMemoryUploadedFile(
+            img_byte_arr,
+            None,
+            "composed_face.png",
+            'image/png',
+            img_byte_arr.getbuffer().nbytes,
+            None
+        )
+        sketch_file.content_type = 'image/png'
+        
+        sketch_url, filename = upload_to_s3(sketch_file, f"sketches/composed_{filename}")
+        
+        # Get face encoding
+        encoding = None
+        if request.data.get('get_encoding', 'false').lower() == 'true':
+            sketch_3ch = convert_sketch_to_3channel(sketch)
+            sketch_3ch_pil = cv2_to_pil(sketch_3ch)
+            img_byte_arr_3ch = io.BytesIO()
+            sketch_3ch_pil.save(img_byte_arr_3ch, format='PNG')
+            img_byte_arr_3ch.seek(0)
+            
+            encoding_array = get_face_encoding(img_byte_arr_3ch)
+            if encoding_array is not None:
+                encoding = encoding_array.tolist()
+        
+        return Response(
+            {
+                'sketch_url': sketch_url,
+                'features_used': selected_features,
+                'gan_enhanced': enhance_with_gan,
+                'encoding': encoding
+            },
+            status=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+def get_feature_library(request):
+    """
+    Get available facial features for the composer
+    """
+    try:
+        # In production, this would list actual feature files from S3
+        # For now, return metadata about available features
+        
+        feature_library = {
+            'face_shapes': [
+                {'id': 'face_1', 'name': 'Oval', 'thumbnail': '/features/faces/face_1_thumb.png'},
+                {'id': 'face_2', 'name': 'Round', 'thumbnail': '/features/faces/face_2_thumb.png'},
+                {'id': 'face_3', 'name': 'Square', 'thumbnail': '/features/faces/face_3_thumb.png'},
+            ],
+            'eyes': [
+                {'id': 'eyes_1', 'name': 'Almond', 'thumbnail': '/features/eyes/eyes_1_thumb.png'},
+                {'id': 'eyes_2', 'name': 'Round', 'thumbnail': '/features/eyes/eyes_2_thumb.png'},
+                {'id': 'eyes_3', 'name': 'Narrow', 'thumbnail': '/features/eyes/eyes_3_thumb.png'},
+            ],
+            'noses': [
+                {'id': 'nose_1', 'name': 'Straight', 'thumbnail': '/features/noses/nose_1_thumb.png'},
+                {'id': 'nose_2', 'name': 'Button', 'thumbnail': '/features/noses/nose_2_thumb.png'},
+                {'id': 'nose_3', 'name': 'Aquiline', 'thumbnail': '/features/noses/nose_3_thumb.png'},
+            ],
+            'mouths': [
+                {'id': 'mouth_1', 'name': 'Neutral', 'thumbnail': '/features/mouths/mouth_1_thumb.png'},
+                {'id': 'mouth_2', 'name': 'Smiling', 'thumbnail': '/features/mouths/mouth_2_thumb.png'},
+                {'id': 'mouth_3', 'name': 'Small', 'thumbnail': '/features/mouths/mouth_3_thumb.png'},
+            ],
+            'eyebrows': [
+                {'id': 'brow_1', 'name': 'Straight', 'thumbnail': '/features/eyebrows/brow_1_thumb.png'},
+                {'id': 'brow_2', 'name': 'Arched', 'thumbnail': '/features/eyebrows/brow_2_thumb.png'},
+                {'id': 'brow_3', 'name': 'Angled', 'thumbnail': '/features/eyebrows/brow_3_thumb.png'},
+            ],
+        }
+        
+        return Response(feature_library, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
