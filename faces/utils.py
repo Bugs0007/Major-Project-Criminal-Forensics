@@ -13,7 +13,10 @@ def upload_to_s3(file, filename=None):
     Upload file to S3 and return public URL
     """
     if filename is None:
-        ext = file.name.split('.')[-1]
+        if hasattr(file, 'name'):
+            ext = file.name.split('.')[-1]
+        else:
+            ext = 'jpg'  # Default to jpg for BytesIO objects
         filename = f"{uuid.uuid4()}.{ext}"
     
     s3_client = boto3.client(
@@ -24,13 +27,16 @@ def upload_to_s3(file, filename=None):
     )
     
     try:
+        # Get content type, default to image/jpeg for BytesIO objects
+        content_type = getattr(file, 'content_type', 'image/jpeg')
+        
         s3_client.upload_fileobj(
             file,
             settings.AWS_STORAGE_BUCKET_NAME,
             filename,
             ExtraArgs={
-                'ACL': 'public-read',
-                'ContentType': file.content_type
+                # 'ACL': 'public-read',
+                'ContentType': content_type
             }
         )
         
