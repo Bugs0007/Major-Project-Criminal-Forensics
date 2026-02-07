@@ -38,6 +38,9 @@ def upload_face(request):
     notes = serializer.validated_data.get('notes', '')
     
     try:
+        # Store original filename before resizing
+        original_filename = image_file.name if hasattr(image_file, 'name') else 'image.jpg'
+        
         # Resize if needed
         image_file = resize_image_if_needed(image_file)
         
@@ -56,13 +59,13 @@ def upload_face(request):
         # Upload to S3
         image_url, filename = upload_to_s3(
             image_file,
-            filename=f"faces/{image_file.name}"
+            filename=f"faces/{original_filename}"
         )
         
         # Save to database
         face_image = FaceImage(
             image_url=image_url,
-            original_filename=image_file.name,
+            original_filename=original_filename,
             name=name,
             tags=tags,
             notes=notes
