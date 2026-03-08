@@ -233,13 +233,26 @@ class FaceFeatureComposer:
     """
     
     # Feature positions (relative to 512x512 canvas)
+    # Keys use plural form to match feature template names
     FEATURE_POSITIONS = {
-        'eyes': (256, 180),      # Center X, Y position
-        'nose': (256, 280),
-        'mouth': (256, 360),
-        'eyebrows': (256, 150),
-        'face_shape': (256, 256),
-        'hair': (256, 100),
+        'eyes': (256, 210),      # Center X, Y position
+        'noses': (256, 300),
+        'mouths': (256, 380),
+        'eyebrows': (256, 165),
+        'face_shapes': (200, 256),
+        'ears': (200, 230),
+        'hair': (180, 80),
+    }
+    
+    # Target sizes for each feature type on the 512x512 canvas
+    FEATURE_SIZES = {
+        'eyes': (300, 80),       # width, height  (pair)
+        'noses': (100, 140),
+        'mouths': (200, 70),
+        'eyebrows': (300, 50),   # pair
+        'face_shapes': (400, 512),
+        'ears': (400, 120),      # pair, wide to sit on face sides
+        'hair': (380, 180),
     }
     
     @staticmethod
@@ -270,22 +283,24 @@ class FaceFeatureComposer:
     
     @staticmethod
     def compose_face(selected_features: dict, 
-                     canvas_size: Tuple[int, int] = (512, 512)) -> np.ndarray:
+                     canvas_size: Tuple[int, int] = (512, 512),
+                     custom_positions: dict = None) -> np.ndarray:
         """
         Compose face from selected features
         
         Args:
-            selected_features: Dict with keys like 'eyes', 'nose', 'mouth'
+            selected_features: Dict with keys like 'eyes', 'noses', 'mouths'
                               Values are feature image arrays (already loaded)
             canvas_size: Output image size
+            custom_positions: Optional dict of {feature_type: {x, y}} for user-placed positions
         
         Returns:
             Composed face as numpy array
         """
         canvas = FaceFeatureComposer.create_blank_canvas(canvas_size)
         
-        # Layer order (back to front)
-        layer_order = ['face_shape', 'eyebrows', 'eyes', 'nose', 'mouth']
+        # Layer order (back to front) - use plural keys to match feature template names
+        layer_order = ['face_shapes', 'hair', 'ears', 'eyebrows', 'eyes', 'noses', 'mouths']
         
         for feature_type in layer_order:
             if feature_type not in selected_features:
@@ -303,11 +318,18 @@ class FaceFeatureComposer:
             if feature_img is None:
                 continue
             
+            # Get custom position if provided
+            pos_override = None
+            if custom_positions and feature_type in custom_positions:
+                p = custom_positions[feature_type]
+                pos_override = (int(p.get('x', 256)), int(p.get('y', 256)))
+            
             # Position and blend
             canvas = FaceFeatureComposer._blend_feature(
                 canvas, 
                 feature_img, 
-                feature_type
+                feature_type,
+                pos_override=pos_override
             )
         
         return canvas
@@ -315,32 +337,46 @@ class FaceFeatureComposer:
     @staticmethod
     def _blend_feature(canvas: np.ndarray, 
                        feature: np.ndarray, 
-                       feature_type: str) -> np.ndarray:
+                       feature_type: str,
+                       pos_override: tuple = None) -> np.ndarray:
         """
         Blend a feature onto the canvas at the correct position with alpha blending
         """
         if feature is None:
             return canvas
         
-        pos = FaceFeatureComposer.FEATURE_POSITIONS.get(feature_type, (256, 256))
+        pos = pos_override or FaceFeatureComposer.FEATURE_POSITIONS.get(feature_type, (256, 256))
+        
+        # Scale feature to target size for the canvas
+        target_size = FaceFeatureComposer.FEATURE_SIZES.get(feature_type)
+        if target_size is not None:
+            feature = cv2.resize(feature, target_size, interpolation=cv2.INTER_AREA)
         
         # Check if feature has alpha channel
         has_alpha = feature.shape[2] == 4 if len(feature.shape) == 3 else False
         
         # Get feature dimensions
         h, w = feature.shape[:2]
+        ch, cw = canvas.shape[:2]
         
-        # Calculate position on canvas (centered on pos)
-        y1 = max(0, pos[1] - h // 2)
-        y2 = min(canvas.shape[0], y1 + h)
-        x1 = max(0, pos[0] - w // 2)
-        x2 = min(canvas.shape[1], x1 + w)
+        # Top-left corner of feature on canvas
+        canvas_x = pos[0] - w // 2
+        canvas_y = pos[1] - h // 2
         
-        # Adjust feature region if it goes out of bounds
-        feat_y1 = 0 if y1 >= 0 else -(pos[1] - h // 2)
-        feat_y2 = h if y2 <= canvas.shape[0] else h - (y1 + h - canvas.shape[0])
-        feat_x1 = 0 if x1 >= 0 else -(pos[0] - w // 2)
-        feat_x2 = w if x2 <= canvas.shape[1] else w - (x1 + w - canvas.shape[1])
+        # Clamp to canvas bounds
+        x1 = max(0, canvas_x)
+        y1 = max(0, canvas_y)
+        x2 = min(cw, canvas_x + w)
+        y2 = min(ch, canvas_y + h)
+        
+        if x2 <= x1 or y2 <= y1:
+            return canvas
+        
+        # Corresponding region in the feature image
+        feat_x1 = x1 - canvas_x
+        feat_y1 = y1 - canvas_y
+        feat_x2 = feat_x1 + (x2 - x1)
+        feat_y2 = feat_y1 + (y2 - y1)
         
         # Extract the region of interest
         roi = canvas[y1:y2, x1:x2]
