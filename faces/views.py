@@ -29,6 +29,16 @@ from django.conf import settings
 import io
 import os
 import uuid
+import re
+
+
+def _to_bool(value, default=False):
+    """Safely parse booleans from JSON booleans, strings, or missing values."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @api_view(['POST'])
@@ -241,9 +251,9 @@ def image_to_sketch(request):
     
     image_file = request.FILES['image']
     sketch_method = request.data.get('method', 'adaptive')  # pencil, edge, adaptive
-    enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
-    is_blurry = request.data.get('is_blurry', 'false').lower() == 'true'
-    use_super_resolution = request.data.get('super_resolution', 'false').lower() == 'true'
+    enhance_with_gan = _to_bool(request.data.get('enhance_gan'), default=False)
+    is_blurry = _to_bool(request.data.get('is_blurry'), default=False)
+    use_super_resolution = _to_bool(request.data.get('super_resolution'), default=False)
     
     try:
         # Load image
@@ -308,7 +318,7 @@ def image_to_sketch(request):
         
         # Optionally get face encoding for immediate search
         encoding = None
-        if request.data.get('get_encoding', 'false').lower() == 'true':
+        if _to_bool(request.data.get('get_encoding'), default=False):
             encoding_array = get_face_encoding(io.BytesIO(img_bytes))
             if encoding_array is not None:
                 encoding = encoding_array.tolist()
@@ -339,128 +349,117 @@ def image_to_sketch(request):
 @api_view(['POST'])
 def compose_face_from_features(request):
     """
-    Compose face from selected features
+    Compose a face from selected features using AI image generation.
+    Builds a descriptive prompt from the feature names and calls
+    Pollinations.ai (free, no API key) to generate a realistic
+    forensic-style pencil sketch.
     """
+    import requests as http_requests
+    from urllib.parse import quote
+
     try:
         selected_features = request.data.get('features', {})
-        
+
         if not selected_features:
             return Response(
                 {'error': 'No features provided'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Load feature images from templates
-        from .feature_templates import FeatureTemplateGenerator
-        feature_images = {}
-        feature_base_dir = os.path.join(settings.MEDIA_ROOT, 'feature_templates')
-        
-        # Ensure templates exist
-        if not os.path.exists(feature_base_dir):
-            # Generate templates on the fly
-            FeatureTemplateGenerator.save_templates_to_disk(feature_base_dir)
-        
-        # Load selected features
+
+        # --- Map feature IDs to human-readable descriptions ----
+        display_names = {
+            'face_shapes': ['oval', 'round', 'square'],
+            'hair': ['short cropped', 'long flowing', 'curly'],
+            'ears': ['normal', 'pointed', 'small'],
+            'eyes': ['almond-shaped', 'round', 'narrow'],
+            'noses': ['straight', 'button / upturned', 'aquiline / hooked'],
+            'mouths': ['neutral closed', 'slightly smiling', 'small pursed'],
+            'eyebrows': ['straight', 'arched', 'angled'],
+        }
+
+        descriptions = []
         for feature_type, feature_id in selected_features.items():
             if feature_id is None:
                 continue
-                
-            # Load feature from disk or generate on the fly
-            feature_img = FeatureTemplateGenerator.load_feature_from_disk(
-                feature_type, 
-                feature_id, 
-                feature_base_dir
-            )
-            
-            if feature_img is not None:
-                feature_images[feature_type] = feature_img
-        
-        if not feature_images:
+            try:
+                idx = int(feature_id.split('_')[-1]) - 1
+                names = display_names.get(feature_type, [])
+                if 0 <= idx < len(names):
+                    label = feature_type.replace('_', ' ')
+                    descriptions.append(f"{names[idx]} {label}")
+            except (ValueError, IndexError):
+                pass
+
+        if not descriptions:
             return Response(
-                {'error': 'Could not load any features'},
+                {'error': 'No valid features selected'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # Compose face
-        composed_face = FaceFeatureComposer.compose_face(feature_images)
-        
-        # Convert to sketch style (optional - can return as-is)
-        convert_to_sketch = request.data.get('convert_to_sketch', 'true').lower() == 'true'
-        
-        if convert_to_sketch:
-            # Convert composed face to sketch
-            sketch = SketchGenerator.image_to_sketch_adaptive(composed_face)
-            
-            # Optional GAN enhancement
-            enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
-            if enhance_with_gan:
-                gan_enhancer = get_gan_enhancer()
-                sketch = gan_enhancer.enhance_sketch(sketch)
-            
-            final_image = sketch
-        else:
-            final_image = cv2.cvtColor(composed_face, cv2.COLOR_BGR2RGB)
-        
-        # Convert to PIL
-        if len(final_image.shape) == 2:
-            final_pil = Image.fromarray(final_image, mode='L')
-        else:
-            final_pil = Image.fromarray(final_image)
-        
-        # Save to bytes
-        img_byte_arr = io.BytesIO()
-        final_pil.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        
-        # Get image bytes before uploading
-        img_bytes = img_byte_arr.getvalue()
-        img_byte_arr.seek(0)
-        
-        # Upload to S3
+
+        feature_text = ', '.join(descriptions)
+
+        prompt = (
+            f"Realistic police forensic pencil sketch portrait of a person, "
+            f"detailed graphite drawing on white paper, "
+            f"front-facing mugshot style, neutral expression, "
+            f"with the following facial features: {feature_text}. "
+            f"Black and white pencil sketch, high detail, professional forensic artist style, "
+            f"clean white background, no color, no watermark"
+        )
+
+        # --- Call Pollinations.ai (free, no API key) ----
+        encoded_prompt = quote(prompt, safe='')
+        poll_url = (
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+            f"?width=512&height=512&nologo=true&seed={uuid.uuid4().int % 100000}"
+        )
+
+        print(f"[AI Compose] Prompt: {prompt[:120]}...")
+        print(f"[AI Compose] Calling Pollinations.ai...")
+
+        ai_response = http_requests.get(poll_url, timeout=120)
+        if ai_response.status_code != 200 or len(ai_response.content) < 1000:
+            raise RuntimeError(
+                f"AI image generation failed (status {ai_response.status_code})"
+            )
+
+        img_bytes = ai_response.content
+        print(f"[AI Compose] Received image: {len(img_bytes)} bytes")
+
+        # --- Upload to S3 ----
         from django.core.files.uploadedfile import InMemoryUploadedFile
-        import uuid
         filename = f"composed_{uuid.uuid4()}.png"
-        
+
         composed_file = InMemoryUploadedFile(
             io.BytesIO(img_bytes),
             None,
             filename,
             'image/png',
             len(img_bytes),
-            None
+            None,
         )
         composed_file.content_type = 'image/png'
-        
+
         composed_url, _ = upload_to_s3(composed_file, f"sketches/{filename}")
-        
-        # Get face encoding
+
+        # --- Optionally get face encoding ----
         encoding = None
-        if request.data.get('get_encoding', 'false').lower() == 'true':
-            # Convert to 3-channel if grayscale for face encoding
-            if len(final_image.shape) == 2:
-                final_image_3ch = convert_sketch_to_3channel(final_image)
-            else:
-                final_image_3ch = final_image
-            
-            final_pil_3ch = cv2_to_pil(final_image_3ch)
-            img_byte_arr_3ch = io.BytesIO()
-            final_pil_3ch.save(img_byte_arr_3ch, format='PNG')
-            img_byte_arr_3ch.seek(0)
-            
-            encoding_array = get_face_encoding(img_byte_arr_3ch)
+        if _to_bool(request.data.get('get_encoding'), default=False):
+            encoding_array = get_face_encoding(io.BytesIO(img_bytes))
             if encoding_array is not None:
                 encoding = encoding_array.tolist()
-        
+
         return Response(
             {
                 'sketch_url': composed_url,
                 'features_used': selected_features,
-                'gan_enhanced': request.data.get('enhance_gan', 'false').lower() == 'true',
-                'encoding': encoding
+                'ai_generated': True,
+                'prompt': prompt,
+                'encoding': encoding,
             },
             status=status.HTTP_200_OK
         )
-        
+
     except Exception as e:
         import traceback
         print(f"Error composing face: {str(e)}")
@@ -477,36 +476,66 @@ def get_feature_library(request):
     Get available facial features for the composer
     """
     try:
-        # In production, this would list actual feature files from S3
-        # For now, return metadata about available features
-        
-        feature_library = {
-            'face_shapes': [
-                {'id': 'face_1', 'name': 'Oval', 'thumbnail': '/features/faces/face_1_thumb.png'},
-                {'id': 'face_2', 'name': 'Round', 'thumbnail': '/features/faces/face_2_thumb.png'},
-                {'id': 'face_3', 'name': 'Square', 'thumbnail': '/features/faces/face_3_thumb.png'},
-            ],
-            'eyes': [
-                {'id': 'eyes_1', 'name': 'Almond', 'thumbnail': '/features/eyes/eyes_1_thumb.png'},
-                {'id': 'eyes_2', 'name': 'Round', 'thumbnail': '/features/eyes/eyes_2_thumb.png'},
-                {'id': 'eyes_3', 'name': 'Narrow', 'thumbnail': '/features/eyes/eyes_3_thumb.png'},
-            ],
-            'noses': [
-                {'id': 'nose_1', 'name': 'Straight', 'thumbnail': '/features/noses/nose_1_thumb.png'},
-                {'id': 'nose_2', 'name': 'Button', 'thumbnail': '/features/noses/nose_2_thumb.png'},
-                {'id': 'nose_3', 'name': 'Aquiline', 'thumbnail': '/features/noses/nose_3_thumb.png'},
-            ],
-            'mouths': [
-                {'id': 'mouth_1', 'name': 'Neutral', 'thumbnail': '/features/mouths/mouth_1_thumb.png'},
-                {'id': 'mouth_2', 'name': 'Smiling', 'thumbnail': '/features/mouths/mouth_2_thumb.png'},
-                {'id': 'mouth_3', 'name': 'Small', 'thumbnail': '/features/mouths/mouth_3_thumb.png'},
-            ],
-            'eyebrows': [
-                {'id': 'brow_1', 'name': 'Straight', 'thumbnail': '/features/eyebrows/brow_1_thumb.png'},
-                {'id': 'brow_2', 'name': 'Arched', 'thumbnail': '/features/eyebrows/brow_2_thumb.png'},
-                {'id': 'brow_3', 'name': 'Angled', 'thumbnail': '/features/eyebrows/brow_3_thumb.png'},
-            ],
+        from .feature_templates import FeatureTemplateGenerator
+
+        feature_base_dir = os.path.join(settings.MEDIA_ROOT, 'feature_templates')
+        feature_types = ['face_shapes', 'hair', 'ears', 'eyes', 'noses', 'mouths', 'eyebrows']
+
+        # Ensure local sketch templates exist.
+        if not os.path.exists(feature_base_dir):
+            FeatureTemplateGenerator.save_templates_to_disk(feature_base_dir)
+
+        for feature_type in feature_types:
+            os.makedirs(os.path.join(feature_base_dir, feature_type), exist_ok=True)
+
+        def _extract_index(filename):
+            match = re.search(r'_(\d+)\.png$', filename)
+            return int(match.group(1)) if match else 9999
+
+        display_names = {
+            'face_shapes': ['Oval', 'Round', 'Square'],
+            'hair': ['Short', 'Long', 'Curly'],
+            'ears': ['Normal', 'Pointed', 'Small'],
+            'eyes': ['Almond', 'Round', 'Narrow'],
+            'noses': ['Straight', 'Button', 'Aquiline'],
+            'mouths': ['Neutral', 'Smiling', 'Small'],
+            'eyebrows': ['Straight', 'Arched', 'Angled'],
         }
+
+        feature_library = {}
+        for feature_type in feature_types:
+            feature_dir = os.path.join(feature_base_dir, feature_type)
+            files = [
+                f for f in os.listdir(feature_dir)
+                if f.lower().endswith('.png')
+            ]
+
+            # Regenerate missing sets on demand.
+            if not files:
+                FeatureTemplateGenerator.save_templates_to_disk(feature_base_dir)
+                files = [
+                    f for f in os.listdir(feature_dir)
+                    if f.lower().endswith('.png')
+                ]
+
+            files.sort(key=_extract_index)
+
+            features = []
+            for filename in files:
+                idx = _extract_index(filename)
+                names = display_names.get(feature_type, [])
+                default_name = f"{feature_type[:-1].replace('_', ' ').title()} {idx}"
+                feature_name = names[idx - 1] if 0 < idx <= len(names) else default_name
+                media_path = f"{settings.MEDIA_URL}feature_templates/{feature_type}/{filename}"
+                features.append(
+                    {
+                        'id': f'{feature_type}_{idx}',
+                        'name': feature_name,
+                        'thumbnail': request.build_absolute_uri(media_path),
+                    }
+                )
+
+            feature_library[feature_type] = features
         
         return Response(feature_library, status=status.HTTP_200_OK)
         
