@@ -28,6 +28,7 @@ from .gan_enhancer import get_gan_enhancer
 from django.conf import settings
 import io
 import os
+import uuid
 
 
 @api_view(['POST'])
@@ -230,7 +231,7 @@ def health_check(request):
 @parser_classes([MultiPartParser, FormParser])
 def image_to_sketch(request):
     """
-    Convert uploaded image to sketch
+    Convert uploaded image to sketch with enhancement options
     """
     if 'image' not in request.FILES:
         return Response(
@@ -241,14 +242,19 @@ def image_to_sketch(request):
     image_file = request.FILES['image']
     sketch_method = request.data.get('method', 'adaptive')  # pencil, edge, adaptive
     enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
+    is_blurry = request.data.get('is_blurry', 'false').lower() == 'true'
+    use_super_resolution = request.data.get('super_resolution', 'false').lower() == 'true'
     
     try:
         # Load image
         image = Image.open(image_file)
         image_cv = pil_to_cv2(image)
         
+        # Apply super-resolution enhancement if requested
+        if use_super_resolution:
+            image_cv = SketchGenerator.super_resolution_enhance(image_cv)
+        
         # Check if image is blurry and preprocess
-        is_blurry = request.data.get('is_blurry', 'false').lower() == 'true'
         if is_blurry:
             image_cv = SketchGenerator.preprocess_blurry_image(image_cv)
         
@@ -285,17 +291,20 @@ def image_to_sketch(request):
         
         # Upload to S3
         from django.core.files.uploadedfile import InMemoryUploadedFile
+        import uuid
+        filename = f"sketch_{uuid.uuid4()}.png"
+        
         sketch_file = InMemoryUploadedFile(
             io.BytesIO(img_bytes),
             None,
-            f"sketch_{image_file.name}",
+            filename,
             'image/png',
             len(img_bytes),
             None
         )
         sketch_file.content_type = 'image/png'
         
-        sketch_url, filename = upload_to_s3(sketch_file, f"sketches/{sketch_file.name}")
+        sketch_url, _ = upload_to_s3(sketch_file, f"sketches/{filename}")
         
         # Optionally get face encoding for immediate search
         encoding = None
@@ -310,12 +319,17 @@ def image_to_sketch(request):
                 'original_filename': image_file.name,
                 'method': sketch_method,
                 'gan_enhanced': enhance_with_gan,
+                'super_resolution_applied': use_super_resolution,
+                'deblur_applied': is_blurry,
                 'encoding': encoding
             },
             status=status.HTTP_200_OK
         )
         
     except Exception as e:
+        import traceback
+        print(f"Error generating sketch: {str(e)}")
+        print(traceback.format_exc())
         return Response(
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -336,57 +350,101 @@ def compose_face_from_features(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Load feature images from paths or IDs
+        # Load feature images from templates
+        from .feature_templates import FeatureTemplateGenerator
         feature_images = {}
+        feature_base_dir = os.path.join(settings.MEDIA_ROOT, 'feature_templates')
+        
+        # Ensure templates exist
+        if not os.path.exists(feature_base_dir):
+            # Generate templates on the fly
+            FeatureTemplateGenerator.save_templates_to_disk(feature_base_dir)
+        
+        # Load selected features
         for feature_type, feature_id in selected_features.items():
-            # In production, load from S3 or local storage
-            # For now, we'll use procedurally generated features
-            feature_path = f"features/{feature_type}/{feature_id}.png"
+            if feature_id is None:
+                continue
+                
+            # Load feature from disk or generate on the fly
+            feature_img = FeatureTemplateGenerator.load_feature_from_disk(
+                feature_type, 
+                feature_id, 
+                feature_base_dir
+            )
             
-            # TODO: Load actual feature image
-            # feature_images[feature_type] = cv2.imread(feature_path, cv2.IMREAD_UNCHANGED)
+            if feature_img is not None:
+                feature_images[feature_type] = feature_img
+        
+        if not feature_images:
+            return Response(
+                {'error': 'Could not load any features'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         # Compose face
         composed_face = FaceFeatureComposer.compose_face(feature_images)
         
-        # Convert to sketch style
-        sketch = SketchGenerator.image_to_sketch_adaptive(composed_face)
+        # Convert to sketch style (optional - can return as-is)
+        convert_to_sketch = request.data.get('convert_to_sketch', 'true').lower() == 'true'
         
-        # Optional GAN enhancement
-        enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
-        if enhance_with_gan:
-            gan_enhancer = get_gan_enhancer()
-            sketch = gan_enhancer.enhance_sketch(sketch)
+        if convert_to_sketch:
+            # Convert composed face to sketch
+            sketch = SketchGenerator.image_to_sketch_adaptive(composed_face)
+            
+            # Optional GAN enhancement
+            enhance_with_gan = request.data.get('enhance_gan', 'false').lower() == 'true'
+            if enhance_with_gan:
+                gan_enhancer = get_gan_enhancer()
+                sketch = gan_enhancer.enhance_sketch(sketch)
+            
+            final_image = sketch
+        else:
+            final_image = cv2.cvtColor(composed_face, cv2.COLOR_BGR2RGB)
         
         # Convert to PIL
-        sketch_pil = cv2_to_pil(sketch)
+        if len(final_image.shape) == 2:
+            final_pil = Image.fromarray(final_image, mode='L')
+        else:
+            final_pil = Image.fromarray(final_image)
         
         # Save to bytes
         img_byte_arr = io.BytesIO()
-        sketch_pil.save(img_byte_arr, format='PNG')
+        final_pil.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        # Get image bytes before uploading
+        img_bytes = img_byte_arr.getvalue()
         img_byte_arr.seek(0)
         
         # Upload to S3
         from django.core.files.uploadedfile import InMemoryUploadedFile
-        sketch_file = InMemoryUploadedFile(
-            img_byte_arr,
+        import uuid
+        filename = f"composed_{uuid.uuid4()}.png"
+        
+        composed_file = InMemoryUploadedFile(
+            io.BytesIO(img_bytes),
             None,
-            "composed_face.png",
+            filename,
             'image/png',
-            img_byte_arr.getbuffer().nbytes,
+            len(img_bytes),
             None
         )
-        sketch_file.content_type = 'image/png'
+        composed_file.content_type = 'image/png'
         
-        sketch_url, filename = upload_to_s3(sketch_file, f"sketches/composed_{filename}")
+        composed_url, _ = upload_to_s3(composed_file, f"sketches/{filename}")
         
         # Get face encoding
         encoding = None
         if request.data.get('get_encoding', 'false').lower() == 'true':
-            sketch_3ch = convert_sketch_to_3channel(sketch)
-            sketch_3ch_pil = cv2_to_pil(sketch_3ch)
+            # Convert to 3-channel if grayscale for face encoding
+            if len(final_image.shape) == 2:
+                final_image_3ch = convert_sketch_to_3channel(final_image)
+            else:
+                final_image_3ch = final_image
+            
+            final_pil_3ch = cv2_to_pil(final_image_3ch)
             img_byte_arr_3ch = io.BytesIO()
-            sketch_3ch_pil.save(img_byte_arr_3ch, format='PNG')
+            final_pil_3ch.save(img_byte_arr_3ch, format='PNG')
             img_byte_arr_3ch.seek(0)
             
             encoding_array = get_face_encoding(img_byte_arr_3ch)
@@ -395,15 +453,18 @@ def compose_face_from_features(request):
         
         return Response(
             {
-                'sketch_url': sketch_url,
+                'sketch_url': composed_url,
                 'features_used': selected_features,
-                'gan_enhanced': enhance_with_gan,
+                'gan_enhanced': request.data.get('enhance_gan', 'false').lower() == 'true',
                 'encoding': encoding
             },
             status=status.HTTP_200_OK
         )
         
     except Exception as e:
+        import traceback
+        print(f"Error composing face: {str(e)}")
+        print(traceback.format_exc())
         return Response(
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
