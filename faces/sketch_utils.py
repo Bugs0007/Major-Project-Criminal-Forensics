@@ -139,7 +139,7 @@ class SketchGenerator:
     @staticmethod
     def preprocess_blurry_image(image_array: np.ndarray) -> np.ndarray:
         """
-        Enhance blurry images before sketch conversion
+        Enhanced deblurring for blurry images using multiple techniques
         
         Args:
             image_array: Input image (BGR)
@@ -147,23 +147,82 @@ class SketchGenerator:
         Returns:
             Enhanced image (BGR)
         """
-        # Deblur using Wiener filter approximation
-        kernel = np.ones((5, 5), np.float32) / 25
-        deblurred = cv2.filter2D(image_array, -1, kernel)
+        # Method 1: Unsharp masking for better edge enhancement
+        gaussian = cv2.GaussianBlur(image_array, (0, 0), 3.0)
+        unsharp_image = cv2.addWeighted(image_array, 1.5, gaussian, -0.5, 0)
         
-        # Sharpen
-        kernel_sharpen = np.array([[-1, -1, -1],
-                                   [-1,  9, -1],
-                                   [-1, -1, -1]])
-        sharpened = cv2.filter2D(deblurred, -1, kernel_sharpen)
+        # Method 2: Advanced sharpening kernel
+        kernel_sharpen = np.array([
+            [-1, -1, -1, -1, -1],
+            [-1,  2,  2,  2, -1],
+            [-1,  2,  8,  2, -1],
+            [-1,  2,  2,  2, -1],
+            [-1, -1, -1, -1, -1]
+        ]) / 8.0
+        sharpened = cv2.filter2D(unsharp_image, -1, kernel_sharpen)
         
-        # Enhance contrast
-        lab = cv2.cvtColor(sharpened, cv2.COLOR_BGR2LAB)
+        # Method 3: Bilateral filter to preserve edges while reducing noise
+        bilateral = cv2.bilateralFilter(sharpened, 9, 75, 75)
+        
+        # Method 4: Enhance contrast using CLAHE on each channel
+        lab = cv2.cvtColor(bilateral, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
+        
+        # Apply CLAHE to L channel
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         l = clahe.apply(l)
+        
+        # Merge channels
         enhanced = cv2.merge([l, a, b])
         enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        
+        # Method 5: Edge enhancement using high-pass filter
+        lowpass = cv2.GaussianBlur(enhanced, (0, 0), 2.0)
+        highpass = cv2.subtract(enhanced, lowpass)
+        enhanced = cv2.add(enhanced, highpass)
+        
+        # Method 6: Detail enhancement
+        detail = cv2.detailEnhance(enhanced, sigma_s=10, sigma_r=0.15)
+        
+        return detail
+    
+    @staticmethod
+    def super_resolution_enhance(image_array: np.ndarray) -> np.ndarray:
+        """
+        Enhanced upscaling and detail recovery for low-quality images
+        Uses advanced interpolation techniques
+        
+        Args:
+            image_array: Input image (BGR)
+        
+        Returns:
+            Enhanced higher resolution image (BGR)
+        """
+        # Get current dimensions
+        h, w = image_array.shape[:2]
+        
+        # If image is small, upscale it first
+        if h < 512 or w < 512:
+            scale_factor = max(512 / h, 512 / w)
+            new_h = int(h * scale_factor)
+            new_w = int(w * scale_factor)
+            
+            # Use INTER_CUBIC for upscaling (better quality than linear)
+            upscaled = cv2.resize(image_array, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        else:
+            upscaled = image_array.copy()
+        
+        # Denoise while preserving details
+        denoised = cv2.fastNlMeansDenoisingColored(upscaled, None, 10, 10, 7, 21)
+        
+        # Enhance sharpness
+        kernel = np.array([[-1, -1, -1],
+                          [-1,  9, -1],
+                          [-1, -1, -1]])
+        sharpened = cv2.filter2D(denoised, -1, kernel)
+        
+        # Blend original and sharpened (to avoid over-sharpening)
+        enhanced = cv2.addWeighted(denoised, 0.6, sharpened, 0.4, 0)
         
         return enhanced
 
@@ -217,7 +276,7 @@ class FaceFeatureComposer:
         
         Args:
             selected_features: Dict with keys like 'eyes', 'nose', 'mouth'
-                              Values are feature image paths or arrays
+                              Values are feature image arrays (already loaded)
             canvas_size: Output image size
         
         Returns:
@@ -226,7 +285,7 @@ class FaceFeatureComposer:
         canvas = FaceFeatureComposer.create_blank_canvas(canvas_size)
         
         # Layer order (back to front)
-        layer_order = ['face_shape', 'hair', 'eyebrows', 'eyes', 'nose', 'mouth']
+        layer_order = ['face_shape', 'eyebrows', 'eyes', 'nose', 'mouth']
         
         for feature_type in layer_order:
             if feature_type not in selected_features:
@@ -240,6 +299,9 @@ class FaceFeatureComposer:
             # If it's a file path, load it
             if isinstance(feature_img, str):
                 feature_img = cv2.imread(feature_img, cv2.IMREAD_UNCHANGED)
+            
+            if feature_img is None:
+                continue
             
             # Position and blend
             canvas = FaceFeatureComposer._blend_feature(
@@ -255,25 +317,56 @@ class FaceFeatureComposer:
                        feature: np.ndarray, 
                        feature_type: str) -> np.ndarray:
         """
-        Blend a feature onto the canvas at the correct position
+        Blend a feature onto the canvas at the correct position with alpha blending
         """
         if feature is None:
             return canvas
         
         pos = FaceFeatureComposer.FEATURE_POSITIONS.get(feature_type, (256, 256))
         
-        # Resize feature if needed
-        # TODO: Implement proper alpha blending with transparency
+        # Check if feature has alpha channel
+        has_alpha = feature.shape[2] == 4 if len(feature.shape) == 3 else False
         
-        # For now, simple paste (will be improved with actual feature images)
+        # Get feature dimensions
         h, w = feature.shape[:2]
-        y1 = max(0, pos[1] - h // 2)
-        y2 = min(canvas.shape[0], pos[1] + h // 2)
-        x1 = max(0, pos[0] - w // 2)
-        x2 = min(canvas.shape[1], pos[0] + w // 2)
         
-        # Simple overlay (will be replaced with alpha blending)
-        canvas[y1:y2, x1:x2] = feature[:y2-y1, :x2-x1]
+        # Calculate position on canvas (centered on pos)
+        y1 = max(0, pos[1] - h // 2)
+        y2 = min(canvas.shape[0], y1 + h)
+        x1 = max(0, pos[0] - w // 2)
+        x2 = min(canvas.shape[1], x1 + w)
+        
+        # Adjust feature region if it goes out of bounds
+        feat_y1 = 0 if y1 >= 0 else -(pos[1] - h // 2)
+        feat_y2 = h if y2 <= canvas.shape[0] else h - (y1 + h - canvas.shape[0])
+        feat_x1 = 0 if x1 >= 0 else -(pos[0] - w // 2)
+        feat_x2 = w if x2 <= canvas.shape[1] else w - (x1 + w - canvas.shape[1])
+        
+        # Extract the region of interest
+        roi = canvas[y1:y2, x1:x2]
+        feature_region = feature[feat_y1:feat_y2, feat_x1:feat_x2]
+        
+        if has_alpha:
+            # Alpha blending
+            alpha = feature_region[:, :, 3:4] / 255.0
+            feature_rgb = feature_region[:, :, :3]
+            
+            # Blend
+            blended = (alpha * feature_rgb + (1 - alpha) * roi).astype(np.uint8)
+            canvas[y1:y2, x1:x2] = blended
+        else:
+            # Simple overlay for non-transparent features
+            # Only copy non-white pixels (assuming white background)
+            if len(feature_region.shape) == 3:
+                gray = cv2.cvtColor(feature_region, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = feature_region
+            
+            # Create mask: copy where feature is not white
+            mask = gray < 250
+            mask_3ch = np.stack([mask] * 3, axis=-1)
+            
+            canvas[y1:y2, x1:x2] = np.where(mask_3ch, feature_region, roi)
         
         return canvas
 
