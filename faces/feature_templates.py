@@ -151,18 +151,23 @@ class FeatureTemplateGenerator:
         return faces
     
     @staticmethod
-    def save_templates_to_disk(output_dir: str):
-        """Save all generated templates to disk"""
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Generate and save all templates
-        templates = {
+    def generate_all_templates() -> Dict[str, List[np.ndarray]]:
+        """Generate all feature templates"""
+        return {
             'eyes': FeatureTemplateGenerator.generate_eye_templates(),
             'noses': FeatureTemplateGenerator.generate_nose_templates(),
             'mouths': FeatureTemplateGenerator.generate_mouth_templates(),
             'eyebrows': FeatureTemplateGenerator.generate_eyebrow_templates(),
             'face_shapes': FeatureTemplateGenerator.generate_face_shape_templates(),
         }
+    
+    @staticmethod
+    def save_templates_to_disk(output_dir: str):
+        """Save all generated templates to disk"""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate and save all templates
+        templates = FeatureTemplateGenerator.generate_all_templates()
         
         for feature_type, template_list in templates.items():
             feature_dir = os.path.join(output_dir, feature_type)
@@ -173,3 +178,38 @@ class FeatureTemplateGenerator:
                 cv2.imwrite(filepath, template)
         
         print(f"Templates saved to {output_dir}")
+        return templates
+    
+    @staticmethod
+    def load_feature_from_disk(feature_type: str, feature_id: str, base_dir: str) -> np.ndarray:
+        """Load a specific feature template from disk"""
+        # Extract index from feature_id (e.g., 'eyes_1' -> 1)
+        try:
+            parts = feature_id.split('_')
+            idx = int(parts[-1])
+            filepath = os.path.join(base_dir, feature_type, f"{feature_type}_{idx}.png")
+            
+            if os.path.exists(filepath):
+                return cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
+            else:
+                # Generate on the fly if not found
+                return FeatureTemplateGenerator._generate_feature_by_index(feature_type, idx)
+        except Exception as e:
+            print(f"Error loading feature {feature_id}: {e}")
+            return None
+    
+    @staticmethod
+    def _generate_feature_by_index(feature_type: str, idx: int) -> np.ndarray:
+        """Generate a specific feature by index on the fly"""
+        templates = {
+            'eyes': FeatureTemplateGenerator.generate_eye_templates(),
+            'noses': FeatureTemplateGenerator.generate_nose_templates(),
+            'mouths': FeatureTemplateGenerator.generate_mouth_templates(),
+            'eyebrows': FeatureTemplateGenerator.generate_eyebrow_templates(),
+            'face_shapes': FeatureTemplateGenerator.generate_face_shape_templates(),
+        }
+        
+        if feature_type in templates and 0 < idx <= len(templates[feature_type]):
+            return templates[feature_type][idx - 1]
+        
+        return None
