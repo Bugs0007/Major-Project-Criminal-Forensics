@@ -241,7 +241,13 @@ def health_check(request):
 @parser_classes([MultiPartParser, FormParser])
 def image_to_sketch(request):
     """
-    Convert uploaded image to sketch with enhancement options
+    Convert uploaded image to sketch with enhancement options.
+
+    When ``use_ai=True`` the endpoint uses the same Pollinations.ai image
+    generator that ``compose_face_from_features`` uses.  This is especially
+    useful for blurry / low-quality images where traditional OpenCV
+    processing produces poor results.  Pass an optional ``description``
+    field (e.g. "male, oval face, short dark hair") to guide generation.
     """
     if 'image' not in request.FILES:
         return Response(
@@ -254,86 +260,119 @@ def image_to_sketch(request):
     enhance_with_gan = _to_bool(request.data.get('enhance_gan'), default=False)
     is_blurry = _to_bool(request.data.get('is_blurry'), default=False)
     use_super_resolution = _to_bool(request.data.get('super_resolution'), default=False)
+    use_ai = _to_bool(request.data.get('use_ai'), default=False)
+    description = request.data.get('description', '')
     
     try:
-        # Load image
-        image = Image.open(image_file)
-        image_cv = pil_to_cv2(image)
-        
-        # Apply super-resolution enhancement if requested
-        if use_super_resolution:
-            image_cv = SketchGenerator.super_resolution_enhance(image_cv)
-        
-        # Check if image is blurry and preprocess
-        if is_blurry:
-            image_cv = SketchGenerator.preprocess_blurry_image(image_cv)
-        
-        # Generate sketch based on method
-        if sketch_method == 'pencil':
-            sketch = SketchGenerator.image_to_sketch_pencil(image_cv)
-        elif sketch_method == 'edge':
-            sketch = SketchGenerator.image_to_sketch_edge(image_cv)
-        else:  # adaptive (default)
-            sketch = SketchGenerator.image_to_sketch_adaptive(image_cv)
-        
-        # Enhance sketch
-        sketch = SketchGenerator.enhance_sketch(sketch)
-        
-        # Optional GAN enhancement
-        if enhance_with_gan:
-            gan_enhancer = get_gan_enhancer()
-            sketch = gan_enhancer.enhance_sketch(sketch)
-        
-        # Convert to 3-channel for face recognition compatibility
-        sketch_3ch = convert_sketch_to_3channel(sketch)
-        
-        # Convert to PIL
-        sketch_pil = cv2_to_pil(sketch)
-        
-        # Save to bytes
-        img_byte_arr = io.BytesIO()
-        sketch_pil.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        
-        # Get image bytes before creating InMemoryUploadedFile
-        img_bytes = img_byte_arr.getvalue()
-        img_byte_arr.seek(0)
-        
-        # Upload to S3
-        from django.core.files.uploadedfile import InMemoryUploadedFile
-        import uuid
-        filename = f"sketch_{uuid.uuid4()}.png"
-        
-        sketch_file = InMemoryUploadedFile(
-            io.BytesIO(img_bytes),
-            None,
-            filename,
-            'image/png',
-            len(img_bytes),
-            None
-        )
-        sketch_file.content_type = 'image/png'
-        
-        sketch_url, _ = upload_to_s3(sketch_file, f"sketches/{filename}")
-        
-        # Optionally get face encoding for immediate search
+        # ----- AI path (Pollinations.ai) -----
+        if use_ai:
+            import requests as http_requests
+            from urllib.parse import quote
+
+            if description:
+                feature_text = description
+            else:
+                feature_text = "front-facing portrait"
+
+            prompt = (
+                f"Realistic police forensic pencil sketch portrait of a person, "
+                f"detailed graphite drawing on white paper, "
+                f"front-facing mugshot style, neutral expression, "
+                f"with the following description: {feature_text}. "
+                f"Black and white pencil sketch, high detail, professional forensic artist style, "
+                f"clean white background, no color, no watermark"
+            )
+
+            encoded_prompt = quote(prompt, safe='')
+            poll_url = (
+                f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+                f"?width=512&height=512&nologo=true&seed={uuid.uuid4().int % 100000}"
+            )
+
+            print(f"[AI Sketch] Prompt: {prompt[:120]}...")
+            print(f"[AI Sketch] Calling Pollinations.ai...")
+
+            ai_response = http_requests.get(poll_url, timeout=120)
+            if ai_response.status_code != 200 or len(ai_response.content) < 1000:
+                raise RuntimeError(
+                    f"AI image generation failed (status {ai_response.status_code})"
+                )
+
+            img_bytes = ai_response.content
+            print(f"[AI Sketch] Received image: {len(img_bytes)} bytes")
+        else:
+            # ----- Traditional OpenCV path -----
+            image = Image.open(image_file)
+            image_cv = pil_to_cv2(image)
+
+            if use_super_resolution:
+                image_cv = SketchGenerator.super_resolution_enhance(image_cv)
+
+            if is_blurry:
+                image_cv = SketchGenerator.preprocess_blurry_image(image_cv)
+
+            if sketch_method == 'pencil':
+                sketch = SketchGenerator.image_to_sketch_pencil(image_cv)
+            elif sketch_method == 'edge':
+                sketch = SketchGenerator.image_to_sketch_edge(image_cv)
+            else:
+                sketch = SketchGenerator.image_to_sketch_adaptive(image_cv)
+
+            sketch = SketchGenerator.enhance_sketch(sketch)
+
+            if enhance_with_gan:
+                gan_enhancer = get_gan_enhancer()
+                sketch = gan_enhancer.enhance_sketch(sketch)
+
+            sketch_pil = cv2_to_pil(sketch)
+            buf = io.BytesIO()
+            sketch_pil.save(buf, format='PNG')
+            img_bytes = buf.getvalue()
+
+        # ----- Base64 representation (always available) -----
+        import base64
+        sketch_b64 = base64.b64encode(img_bytes).decode('utf-8')
+
+        # ----- Try S3 upload, but don't fail if it's unreachable -----
+        sketch_url = None
+        try:
+            from django.core.files.uploadedfile import InMemoryUploadedFile
+            filename = f"sketch_{uuid.uuid4()}.png"
+
+            sketch_file = InMemoryUploadedFile(
+                io.BytesIO(img_bytes),
+                None,
+                filename,
+                'image/png',
+                len(img_bytes),
+                None,
+            )
+            sketch_file.content_type = 'image/png'
+
+            sketch_url, _ = upload_to_s3(sketch_file, f"sketches/{filename}")
+        except Exception as s3_err:
+            print(f"[Sketch] S3 upload skipped: {s3_err}")
+
+        # ----- Optionally get face encoding -----
         encoding = None
         if _to_bool(request.data.get('get_encoding'), default=False):
             encoding_array = get_face_encoding(io.BytesIO(img_bytes))
             if encoding_array is not None:
                 encoding = encoding_array.tolist()
-        
+
         return Response(
             {
                 'sketch_url': sketch_url,
+                'sketch_base64': sketch_b64,
                 'original_filename': image_file.name,
-                'method': sketch_method,
-                'gan_enhanced': enhance_with_gan,
-                'super_resolution_applied': use_super_resolution,
-                'deblur_applied': is_blurry,
-                'encoding': encoding
+                'method': 'ai' if use_ai else sketch_method,
+                'ai_generated': use_ai,
+                'gan_enhanced': enhance_with_gan and not use_ai,
+                'super_resolution_applied': use_super_resolution and not use_ai,
+                'deblur_applied': is_blurry and not use_ai,
+                'encoding': encoding,
             },
-            status=status.HTTP_200_OK
+            status=status.HTTP_200_OK,
         )
         
     except Exception as e:
@@ -398,11 +437,37 @@ def compose_face_from_features(request):
 
         feature_text = ', '.join(descriptions)
 
+        # --- Optional person details ---
+        person_details = []
+        age = request.data.get('age')
+        gender = request.data.get('gender')
+        ethnicity = request.data.get('ethnicity')
+        additional_notes = request.data.get('additional_notes', '')
+
+        if gender:
+            person_details.append(f"{gender}")
+        if age:
+            person_details.append(f"approximately {age} years old" if age.replace('+', '').isdigit() or age.endswith('s') else f"{age}")
+        if ethnicity:
+            person_details.append(f"{ethnicity} ethnicity")
+
+        person_text = ', '.join(person_details)
+        if person_text:
+            person_text = f"The person is {person_text}. "
+        else:
+            person_text = ""
+
+        notes_text = ''
+        if additional_notes:
+            notes_text = f"Additional distinguishing features: {additional_notes}. "
+
         prompt = (
             f"Realistic police forensic pencil sketch portrait of a person, "
             f"detailed graphite drawing on white paper, "
             f"front-facing mugshot style, neutral expression, "
+            f"{person_text}"
             f"with the following facial features: {feature_text}. "
+            f"{notes_text}"
             f"Black and white pencil sketch, high detail, professional forensic artist style, "
             f"clean white background, no color, no watermark"
         )
