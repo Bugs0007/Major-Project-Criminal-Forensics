@@ -385,14 +385,16 @@ def image_to_sketch(request):
                 feature_text = "front-facing portrait"
 
             prompt = (
-                f"Single front-facing portrait only. "
-                f"Realistic police forensic pencil sketch portrait of a person, "
-                f"detailed graphite drawing on white paper, "
-                f"front-facing mugshot style, looking directly at camera, neutral expression, "
-                f"one single face centered in the image, "
-                f"with the following description: {feature_text}. "
-                f"Black and white pencil sketch, high detail, professional forensic artist style, "
-                f"clean white background, no color, no watermark, no multiple views, no side angles"
+                f"Hand-drawn criminal forensic composite sketch by an FBI forensic artist, "
+                f"single front-facing head and shoulders portrait, "
+                f"graphite pencil on white sketch paper, "
+                f"precise cross-hatching and tonal shading technique, "
+                f"subtle pencil strokes visible in the shading, "
+                f"looking straight ahead, neutral expression, "
+                f"{feature_text}. "
+                f"Realistic facial proportions and anatomy, "
+                f"soft gradual shadows under cheekbones and jaw, "
+                f"monochrome grayscale, clean white background"
             )
 
             print(f"[AI Sketch] Prompt: {prompt[:120]}...")
@@ -556,16 +558,18 @@ def compose_face_from_features(request):
             notes_text = f"Additional distinguishing features: {additional_notes}. "
 
         prompt = (
-            f"Single front-facing portrait only. "
-            f"Realistic police forensic pencil sketch portrait of a person, "
-            f"detailed graphite drawing on white paper, "
-            f"front-facing mugshot style, looking directly at camera, neutral expression, "
-            f"one single face centered in the image, "
+            f"Hand-drawn criminal forensic composite sketch by an FBI forensic artist, "
+            f"single front-facing head and shoulders portrait, "
+            f"graphite pencil on white sketch paper, "
+            f"precise cross-hatching and tonal shading technique, "
+            f"subtle pencil strokes visible in the shading, "
+            f"looking straight ahead, neutral expression, "
             f"{person_text}"
-            f"with the following facial features: {feature_text}. "
+            f"facial features: {feature_text}. "
             f"{notes_text}"
-            f"Black and white pencil sketch, high detail, professional forensic artist style, "
-            f"clean white background, no color, no watermark, no multiple views, no side angles"
+            f"Realistic facial proportions and anatomy, "
+            f"soft gradual shadows under cheekbones and jaw, "
+            f"monochrome grayscale, clean white background"
         )
 
         print(f"[AI Compose] Prompt: {prompt[:120]}...")
