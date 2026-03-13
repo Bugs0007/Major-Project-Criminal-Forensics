@@ -79,7 +79,12 @@ def _generate_with_hugging_face(prompt, width=512, height=512):
         'parameters': {
             'width': width,
             'height': height,
-            'negative_prompt': 'color, watermark, logo, text, blurry, low quality',
+            'negative_prompt': (
+                'multiple views, multiple angles, collage, grid, split image, '
+                'side view, profile view, 3/4 view, turnaround sheet, character sheet, '
+                'reference sheet, model sheet, color, watermark, logo, text, blurry, '
+                'low quality, deformed, extra limbs'
+            ),
         },
         'options': {
             'wait_for_model': True,
@@ -108,16 +113,22 @@ def _generate_with_pollinations(prompt, width=512, height=512):
     """Generate an image via Pollinations.ai."""
     encoded_prompt = quote(prompt, safe='')
     model = getattr(settings, 'AI_IMAGE_POLLINATIONS_MODEL', 'flux')
-    poll_url = (
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-        f"?width={width}&height={height}&nologo=true&model={quote(model, safe='')}&seed={uuid.uuid4().int % 100000}"
-    )
-    response = http_requests.get(poll_url, timeout=120)
-    if response.status_code != 200 or len(response.content) < 1000:
-        raise RuntimeError(
-            f"Pollinations generation failed (status {response.status_code}): {_extract_http_error(response)}"
+    for attempt in range(3):
+        poll_url = (
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+            f"?width={width}&height={height}&nologo=true&model={quote(model, safe='')}&seed={uuid.uuid4().int % 100000}"
         )
-    return response.content, 'pollinations', model
+        response = http_requests.get(poll_url, timeout=120)
+        if response.status_code == 200 and len(response.content) >= 1000:
+            return response.content, 'pollinations', model
+
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))
+            continue
+
+    raise RuntimeError(
+        f"Pollinations generation failed after 3 attempts (status {response.status_code}): {_extract_http_error(response)}"
+    )
 
 
 def _generate_ai_sketch_image(prompt, width=512, height=512):
@@ -372,12 +383,14 @@ def image_to_sketch(request):
                 feature_text = "front-facing portrait"
 
             prompt = (
+                f"Single front-facing portrait only. "
                 f"Realistic police forensic pencil sketch portrait of a person, "
                 f"detailed graphite drawing on white paper, "
-                f"front-facing mugshot style, neutral expression, "
+                f"front-facing mugshot style, looking directly at camera, neutral expression, "
+                f"one single face centered in the image, "
                 f"with the following description: {feature_text}. "
                 f"Black and white pencil sketch, high detail, professional forensic artist style, "
-                f"clean white background, no color, no watermark"
+                f"clean white background, no color, no watermark, no multiple views, no side angles"
             )
 
             print(f"[AI Sketch] Prompt: {prompt[:120]}...")
@@ -541,14 +554,16 @@ def compose_face_from_features(request):
             notes_text = f"Additional distinguishing features: {additional_notes}. "
 
         prompt = (
+            f"Single front-facing portrait only. "
             f"Realistic police forensic pencil sketch portrait of a person, "
             f"detailed graphite drawing on white paper, "
-            f"front-facing mugshot style, neutral expression, "
+            f"front-facing mugshot style, looking directly at camera, neutral expression, "
+            f"one single face centered in the image, "
             f"{person_text}"
             f"with the following facial features: {feature_text}. "
             f"{notes_text}"
             f"Black and white pencil sketch, high detail, professional forensic artist style, "
-            f"clean white background, no color, no watermark"
+            f"clean white background, no color, no watermark, no multiple views, no side angles"
         )
 
         print(f"[AI Compose] Prompt: {prompt[:120]}...")
