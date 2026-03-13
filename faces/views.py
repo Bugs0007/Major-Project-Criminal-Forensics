@@ -66,12 +66,12 @@ def _generate_with_hugging_face(prompt, width=512, height=512):
     model = getattr(
         settings,
         'AI_IMAGE_HF_MODEL',
-        'stabilityai/stable-diffusion-xl-base-1.0'
+        'black-forest-labs/FLUX.1-schnell'
     )
     endpoint = f"https://router.huggingface.co/hf-inference/models/{model}"
     headers = {
         'Authorization': f'Bearer {hf_token}',
-        'Accept': 'image/png',
+        'Accept': 'image/jpeg',
         'Content-Type': 'application/json',
     }
     payload = {
@@ -79,17 +79,19 @@ def _generate_with_hugging_face(prompt, width=512, height=512):
         'parameters': {
             'width': width,
             'height': height,
-            'negative_prompt': (
-                'multiple views, multiple angles, collage, grid, split image, '
-                'side view, profile view, 3/4 view, turnaround sheet, character sheet, '
-                'reference sheet, model sheet, color, watermark, logo, text, blurry, '
-                'low quality, deformed, extra limbs'
-            ),
         },
         'options': {
             'wait_for_model': True,
         },
     }
+    # Stable Diffusion models support negative_prompt; FLUX models do not.
+    if 'flux' not in model.lower():
+        payload['parameters']['negative_prompt'] = (
+            'multiple views, multiple angles, collage, grid, split image, '
+            'side view, profile view, 3/4 view, turnaround sheet, character sheet, '
+            'reference sheet, model sheet, color, watermark, logo, text, blurry, '
+            'low quality, deformed, extra limbs'
+        )
 
     for attempt in range(3):
         response = http_requests.post(endpoint, headers=headers, json=payload, timeout=150)
