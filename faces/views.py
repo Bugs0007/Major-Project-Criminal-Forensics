@@ -30,6 +30,10 @@ import io
 import os
 import uuid
 import re
+import time
+
+import requests as http_requests
+from urllib.parse import quote
 
 
 def _to_bool(value, default=False):
@@ -39,6 +43,102 @@ def _to_bool(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_http_error(response):
+    """Best-effort error extraction for upstream AI provider responses."""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload.get('error') or payload.get('message') or str(payload)
+        return str(payload)
+    except Exception:
+        body = (response.text or '').strip()
+        return body[:300] if body else 'unknown upstream error'
+
+
+def _generate_with_hugging_face(prompt, width=512, height=512):
+    """Generate an image via Hugging Face Inference API."""
+    hf_token = getattr(settings, 'HF_API_TOKEN', None) or os.getenv('HF_API_TOKEN')
+    if not hf_token:
+        raise RuntimeError('HF_API_TOKEN is not configured')
+
+    model = getattr(
+        settings,
+        'AI_IMAGE_HF_MODEL',
+        'stabilityai/stable-diffusion-xl-base-1.0'
+    )
+    endpoint = f"https://router.huggingface.co/hf-inference/models/{model}"
+    headers = {
+        'Authorization': f'Bearer {hf_token}',
+        'Accept': 'image/png',
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'inputs': prompt,
+        'parameters': {
+            'width': width,
+            'height': height,
+            'negative_prompt': 'color, watermark, logo, text, blurry, low quality',
+        },
+        'options': {
+            'wait_for_model': True,
+        },
+    }
+
+    for attempt in range(3):
+        response = http_requests.post(endpoint, headers=headers, json=payload, timeout=150)
+        content_type = response.headers.get('Content-Type', '').lower()
+        if response.status_code == 200 and content_type.startswith('image/') and len(response.content) > 1000:
+            return response.content, 'huggingface', model
+
+        if response.status_code in {503, 529} and attempt < 2:
+            time.sleep(2 * (attempt + 1))
+            continue
+
+        error_details = _extract_http_error(response)
+        raise RuntimeError(
+            f"Hugging Face generation failed (status {response.status_code}): {error_details}"
+        )
+
+    raise RuntimeError('Hugging Face generation did not return an image')
+
+
+def _generate_with_pollinations(prompt, width=512, height=512):
+    """Generate an image via Pollinations.ai."""
+    encoded_prompt = quote(prompt, safe='')
+    model = getattr(settings, 'AI_IMAGE_POLLINATIONS_MODEL', 'flux')
+    poll_url = (
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        f"?width={width}&height={height}&nologo=true&model={quote(model, safe='')}&seed={uuid.uuid4().int % 100000}"
+    )
+    response = http_requests.get(poll_url, timeout=120)
+    if response.status_code != 200 or len(response.content) < 1000:
+        raise RuntimeError(
+            f"Pollinations generation failed (status {response.status_code}): {_extract_http_error(response)}"
+        )
+    return response.content, 'pollinations', model
+
+
+def _generate_ai_sketch_image(prompt, width=512, height=512):
+    """Generate AI image bytes with provider failover."""
+    preferred = str(getattr(settings, 'AI_IMAGE_PROVIDER', 'huggingface')).strip().lower()
+    order = ['huggingface', 'pollinations']
+    if preferred == 'pollinations':
+        order = ['pollinations', 'huggingface']
+
+    errors = []
+    for provider in order:
+        try:
+            if provider == 'huggingface':
+                return _generate_with_hugging_face(prompt, width=width, height=height)
+            return _generate_with_pollinations(prompt, width=width, height=height)
+        except Exception as exc:
+            errors.append(f"{provider}: {exc}")
+
+    raise RuntimeError(
+        "AI image generation failed with all providers. " + " | ".join(errors)
+    )
 
 
 @api_view(['POST'])
@@ -243,8 +343,8 @@ def image_to_sketch(request):
     """
     Convert uploaded image to sketch with enhancement options.
 
-    When ``use_ai=True`` the endpoint uses the same Pollinations.ai image
-    generator that ``compose_face_from_features`` uses.  This is especially
+    When ``use_ai=True`` the endpoint uses the same AI image generator
+    with provider fallback as ``compose_face_from_features``. This is especially
     useful for blurry / low-quality images where traditional OpenCV
     processing produces poor results.  Pass an optional ``description``
     field (e.g. "male, oval face, short dark hair") to guide generation.
@@ -264,11 +364,8 @@ def image_to_sketch(request):
     description = request.data.get('description', '')
     
     try:
-        # ----- AI path (Pollinations.ai) -----
+        # ----- AI path -----
         if use_ai:
-            import requests as http_requests
-            from urllib.parse import quote
-
             if description:
                 feature_text = description
             else:
@@ -283,23 +380,9 @@ def image_to_sketch(request):
                 f"clean white background, no color, no watermark"
             )
 
-            encoded_prompt = quote(prompt, safe='')
-            poll_url = (
-                f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-                f"?width=512&height=512&nologo=true&seed={uuid.uuid4().int % 100000}"
-            )
-
             print(f"[AI Sketch] Prompt: {prompt[:120]}...")
-            print(f"[AI Sketch] Calling Pollinations.ai...")
-
-            ai_response = http_requests.get(poll_url, timeout=120)
-            if ai_response.status_code != 200 or len(ai_response.content) < 1000:
-                raise RuntimeError(
-                    f"AI image generation failed (status {ai_response.status_code})"
-                )
-
-            img_bytes = ai_response.content
-            print(f"[AI Sketch] Received image: {len(img_bytes)} bytes")
+            img_bytes, provider, model = _generate_ai_sketch_image(prompt, width=512, height=512)
+            print(f"[AI Sketch] Received image from {provider}/{model}: {len(img_bytes)} bytes")
         else:
             # ----- Traditional OpenCV path -----
             image = Image.open(image_file)
@@ -389,13 +472,9 @@ def image_to_sketch(request):
 def compose_face_from_features(request):
     """
     Compose a face from selected features using AI image generation.
-    Builds a descriptive prompt from the feature names and calls
-    Pollinations.ai (free, no API key) to generate a realistic
-    forensic-style pencil sketch.
+    Builds a descriptive prompt from feature names and generates a
+    realistic forensic-style pencil sketch with provider fallback.
     """
-    import requests as http_requests
-    from urllib.parse import quote
-
     try:
         selected_features = request.data.get('features', {})
 
@@ -472,24 +551,9 @@ def compose_face_from_features(request):
             f"clean white background, no color, no watermark"
         )
 
-        # --- Call Pollinations.ai (free, no API key) ----
-        encoded_prompt = quote(prompt, safe='')
-        poll_url = (
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?width=512&height=512&nologo=true&seed={uuid.uuid4().int % 100000}"
-        )
-
         print(f"[AI Compose] Prompt: {prompt[:120]}...")
-        print(f"[AI Compose] Calling Pollinations.ai...")
-
-        ai_response = http_requests.get(poll_url, timeout=120)
-        if ai_response.status_code != 200 or len(ai_response.content) < 1000:
-            raise RuntimeError(
-                f"AI image generation failed (status {ai_response.status_code})"
-            )
-
-        img_bytes = ai_response.content
-        print(f"[AI Compose] Received image: {len(img_bytes)} bytes")
+        img_bytes, provider, model = _generate_ai_sketch_image(prompt, width=512, height=512)
+        print(f"[AI Compose] Received image from {provider}/{model}: {len(img_bytes)} bytes")
 
         # --- Upload to S3 ----
         from django.core.files.uploadedfile import InMemoryUploadedFile

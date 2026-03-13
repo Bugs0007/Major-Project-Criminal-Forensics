@@ -121,3 +121,13 @@ AWS_S3_CUSTOM_DOMAIN = f'{AWS_STORAGE_BUCKET_NAME}.s3.amazonaws.com'
 # Face Recognition Settings
 FACE_RECOGNITION_TOLERANCE = 0.6  # Lower = more strict matching
 FACE_RECOGNITION_MODEL = 'large'  # 'large' or 'small' (large is more accurate)
+
+# AI image generation settings for sketch compose endpoints.
+# Options: "huggingface" or "pollinations"
+AI_IMAGE_PROVIDER = os.getenv('AI_IMAGE_PROVIDER', 'huggingface')
+HF_API_TOKEN = os.getenv('HF_API_TOKEN')
+AI_IMAGE_HF_MODEL = os.getenv(
+    'AI_IMAGE_HF_MODEL',
+    'stabilityai/stable-diffusion-xl-base-1.0'
+)
+AI_IMAGE_POLLINATIONS_MODEL = os.getenv('AI_IMAGE_POLLINATIONS_MODEL', 'flux')
