@@ -385,16 +385,18 @@ def image_to_sketch(request):
                 feature_text = "front-facing portrait"
 
             prompt = (
-                f"Hand-drawn criminal forensic composite sketch by an FBI forensic artist, "
-                f"single front-facing head and shoulders portrait, "
-                f"graphite pencil on white sketch paper, "
-                f"precise cross-hatching and tonal shading technique, "
-                f"subtle pencil strokes visible in the shading, "
+                f"Criminal forensic composite sketch, "
+                f"single front-facing head and shoulders portrait on white paper, "
+                f"all shading done exclusively with visible hatching and cross-hatching pencil lines, "
+                f"no smooth shading anywhere, "
+                f"every shadow area built up from overlapping sets of parallel pencil strokes at different angles, "
+                f"skin tones rendered with sparse fine hatching lines, "
+                f"darker areas like under the jaw and eye sockets use dense multi-layered cross-hatched pencil strokes, "
+                f"forehead and cheeks shaded with light widely-spaced diagonal hatch marks, "
+                f"hair drawn as individual grouped pencil strokes, "
                 f"looking straight ahead, neutral expression, "
                 f"{feature_text}. "
-                f"Realistic facial proportions and anatomy, "
-                f"soft gradual shadows under cheekbones and jaw, "
-                f"monochrome grayscale, clean white background"
+                f"Monochrome graphite pencil only, white background"
             )
 
             print(f"[AI Sketch] Prompt: {prompt[:120]}...")
@@ -558,18 +560,20 @@ def compose_face_from_features(request):
             notes_text = f"Additional distinguishing features: {additional_notes}. "
 
         prompt = (
-            f"Hand-drawn criminal forensic composite sketch by an FBI forensic artist, "
-            f"single front-facing head and shoulders portrait, "
-            f"graphite pencil on white sketch paper, "
-            f"precise cross-hatching and tonal shading technique, "
-            f"subtle pencil strokes visible in the shading, "
+            f"Criminal forensic composite sketch, "
+            f"single front-facing head and shoulders portrait on white paper, "
+            f"all shading done exclusively with visible hatching and cross-hatching pencil lines, "
+            f"no smooth shading anywhere, "
+            f"every shadow area built up from overlapping sets of parallel pencil strokes at different angles, "
+            f"skin tones rendered with sparse fine hatching lines, "
+            f"darker areas like under the jaw and eye sockets use dense multi-layered cross-hatched pencil strokes, "
+            f"forehead and cheeks shaded with light widely-spaced diagonal hatch marks, "
+            f"hair drawn as individual grouped pencil strokes, "
             f"looking straight ahead, neutral expression, "
             f"{person_text}"
             f"facial features: {feature_text}. "
             f"{notes_text}"
-            f"Realistic facial proportions and anatomy, "
-            f"soft gradual shadows under cheekbones and jaw, "
-            f"monochrome grayscale, clean white background"
+            f"Monochrome graphite pencil only, white background"
         )
 
         print(f"[AI Compose] Prompt: {prompt[:120]}...")
