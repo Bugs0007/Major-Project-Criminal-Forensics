@@ -195,3 +195,21 @@ All endpoints are RESTful and use JSON format for requests and responses. Base U
 - Total faces in database
 
 **Use Case:** Monitoring, deployment verification, diagnostics
+
+---
+
+## AI Sketch Provider Configuration
+
+The sketch AI endpoints (`/api/faces/sketch/` with `use_ai=true` and `/api/faces/sketch/compose-face/`) now support provider failover.
+
+Environment variables:
+
+- `AI_IMAGE_PROVIDER` - Preferred provider. Values: `huggingface` (default) or `pollinations`
+- `HF_API_TOKEN` - Required only for Hugging Face provider
+- `AI_IMAGE_HF_MODEL` - Hugging Face model id (default: `stabilityai/stable-diffusion-xl-base-1.0`)
+- `AI_IMAGE_POLLINATIONS_MODEL` - Pollinations model name (default: `flux`)
+
+Behavior:
+
+- If preferred provider fails, the API automatically falls back to the other provider.
+- If both providers fail, the endpoint returns a 500 with combined provider errors.
