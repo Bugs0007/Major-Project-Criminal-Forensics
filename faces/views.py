@@ -30,10 +30,6 @@ import io
 import os
 import uuid
 import re
-import time
-
-import requests as http_requests
-from urllib.parse import quote
 
 
 def _to_bool(value, default=False):
@@ -45,113 +41,74 @@ def _to_bool(value, default=False):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _extract_http_error(response):
-    """Best-effort error extraction for upstream AI provider responses."""
-    try:
-        payload = response.json()
-        if isinstance(payload, dict):
-            return payload.get('error') or payload.get('message') or str(payload)
-        return str(payload)
-    except Exception:
-        body = (response.text or '').strip()
-        return body[:300] if body else 'unknown upstream error'
-
-
-def _generate_with_hugging_face(prompt, width=512, height=512):
-    """Generate an image via Hugging Face Inference API."""
-    hf_token = getattr(settings, 'HF_API_TOKEN', None) or os.getenv('HF_API_TOKEN')
-    if not hf_token:
-        raise RuntimeError('HF_API_TOKEN is not configured')
-
-    model = getattr(
-        settings,
-        'AI_IMAGE_HF_MODEL',
-        'black-forest-labs/FLUX.1-schnell'
-    )
-    endpoint = f"https://router.huggingface.co/hf-inference/models/{model}"
-    headers = {
-        'Authorization': f'Bearer {hf_token}',
-        'Accept': 'image/jpeg',
-        'Content-Type': 'application/json',
-    }
-    payload = {
-        'inputs': prompt,
-        'parameters': {
-            'width': width,
-            'height': height,
-        },
-        'options': {
-            'wait_for_model': True,
-        },
-    }
-    # Stable Diffusion models support negative_prompt; FLUX models do not.
-    if 'flux' not in model.lower():
-        payload['parameters']['negative_prompt'] = (
-            'multiple views, multiple angles, collage, grid, split image, '
-            'side view, profile view, 3/4 view, turnaround sheet, character sheet, '
-            'reference sheet, model sheet, color, watermark, logo, text, blurry, '
-            'low quality, deformed, extra limbs'
-        )
-
-    for attempt in range(3):
-        response = http_requests.post(endpoint, headers=headers, json=payload, timeout=150)
-        content_type = response.headers.get('Content-Type', '').lower()
-        if response.status_code == 200 and content_type.startswith('image/') and len(response.content) > 1000:
-            return response.content, 'huggingface', model
-
-        if response.status_code in {503, 529} and attempt < 2:
-            time.sleep(2 * (attempt + 1))
-            continue
-
-        error_details = _extract_http_error(response)
-        raise RuntimeError(
-            f"Hugging Face generation failed (status {response.status_code}): {error_details}"
-        )
-
-    raise RuntimeError('Hugging Face generation did not return an image')
-
-
-def _generate_with_pollinations(prompt, width=512, height=512):
-    """Generate an image via Pollinations.ai."""
-    encoded_prompt = quote(prompt, safe='')
-    model = getattr(settings, 'AI_IMAGE_POLLINATIONS_MODEL', 'flux')
-    for attempt in range(3):
+def generate_ai_image(prompt, width=512, height=512):
+    """
+    Generate an image using the configured AI provider.
+    Returns: tuple (image_bytes, provider_name)
+    Raises: RuntimeError on failure
+    """
+    import requests as http_requests
+    from urllib.parse import quote
+    
+    provider = getattr(settings, 'AI_IMAGE_PROVIDER', 'pollinations').lower()
+    
+    if provider == 'huggingface':
+        api_token = getattr(settings, 'HF_API_TOKEN', None)
+        if not api_token:
+            raise RuntimeError("HF_API_TOKEN not configured in settings")
+        
+        model = getattr(settings, 'AI_IMAGE_HF_MODEL', 'stabilityai/stable-diffusion-xl-base-1.0')
+        
+        # Use the new router endpoint with hf-inference provider
+        hf_url = f"https://router.huggingface.co/hf-inference/models/{model}"
+        
+        headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "width": width,
+                "height": height
+            }
+        }
+        
+        print(f"[AI Image] Calling HuggingFace Router ({model})...")
+        response = http_requests.post(hf_url, headers=headers, json=payload, timeout=120)
+        
+        if response.status_code != 200:
+            error_msg = response.text
+            if response.status_code == 503:
+                error_msg = f"Model is loading, please try again in a few moments. Details: {error_msg}"
+            raise RuntimeError(
+                f"HuggingFace API failed (status {response.status_code}): {error_msg}"
+            )
+        
+        if len(response.content) < 1000:
+            raise RuntimeError(f"HuggingFace returned insufficient data ({len(response.content)} bytes)")
+        
+        return response.content, 'huggingface'
+    
+    elif provider == 'pollinations':
+        encoded_prompt = quote(prompt, safe='')
         poll_url = (
             f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?width={width}&height={height}&nologo=true&model={quote(model, safe='')}&seed={uuid.uuid4().int % 100000}"
+            f"?width={width}&height={height}&nologo=true&seed={uuid.uuid4().int % 100000}"
         )
+        
+        print(f"[AI Image] Calling Pollinations.ai...")
         response = http_requests.get(poll_url, timeout=120)
-        if response.status_code == 200 and len(response.content) >= 1000:
-            return response.content, 'pollinations', model
-
-        if attempt < 2:
-            time.sleep(2 * (attempt + 1))
-            continue
-
-    raise RuntimeError(
-        f"Pollinations generation failed after 3 attempts (status {response.status_code}): {_extract_http_error(response)}"
-    )
-
-
-def _generate_ai_sketch_image(prompt, width=512, height=512):
-    """Generate AI image bytes with provider failover."""
-    preferred = str(getattr(settings, 'AI_IMAGE_PROVIDER', 'huggingface')).strip().lower()
-    order = ['huggingface', 'pollinations']
-    if preferred == 'pollinations':
-        order = ['pollinations', 'huggingface']
-
-    errors = []
-    for provider in order:
-        try:
-            if provider == 'huggingface':
-                return _generate_with_hugging_face(prompt, width=width, height=height)
-            return _generate_with_pollinations(prompt, width=width, height=height)
-        except Exception as exc:
-            errors.append(f"{provider}: {exc}")
-
-    raise RuntimeError(
-        "AI image generation failed with all providers. " + " | ".join(errors)
-    )
+        
+        if response.status_code != 200 or len(response.content) < 1000:
+            raise RuntimeError(
+                f"Pollinations.ai failed (status {response.status_code})"
+            )
+        
+        return response.content, 'pollinations'
+    
+    else:
+        raise RuntimeError(f"Unknown AI_IMAGE_PROVIDER: {provider}")
 
 
 @api_view(['POST'])
@@ -356,11 +313,11 @@ def image_to_sketch(request):
     """
     Convert uploaded image to sketch with enhancement options.
 
-    When ``use_ai=True`` the endpoint uses the same AI image generator
-    with provider fallback as ``compose_face_from_features``. This is especially
-    useful for blurry / low-quality images where traditional OpenCV
-    processing produces poor results.  Pass an optional ``description``
-    field (e.g. "male, oval face, short dark hair") to guide generation.
+    When ``use_ai=True`` the endpoint uses the configured AI image
+    generator (HuggingFace or Pollinations) for sketch generation.
+    This is especially useful for blurry / low-quality images where
+    traditional OpenCV processing produces poor results. Pass an optional
+    ``description`` field (e.g. "male, oval face, short dark hair") to guide generation.
     """
     if 'image' not in request.FILES:
         return Response(
@@ -385,23 +342,17 @@ def image_to_sketch(request):
                 feature_text = "front-facing portrait"
 
             prompt = (
-                f"Criminal forensic composite sketch, "
-                f"single front-facing head and shoulders portrait on white paper, "
-                f"all shading done exclusively with visible hatching and cross-hatching pencil lines, "
-                f"no smooth shading anywhere, "
-                f"every shadow area built up from overlapping sets of parallel pencil strokes at different angles, "
-                f"skin tones rendered with sparse fine hatching lines, "
-                f"darker areas like under the jaw and eye sockets use dense multi-layered cross-hatched pencil strokes, "
-                f"forehead and cheeks shaded with light widely-spaced diagonal hatch marks, "
-                f"hair drawn as individual grouped pencil strokes, "
-                f"looking straight ahead, neutral expression, "
-                f"{feature_text}. "
-                f"Monochrome graphite pencil only, white background"
+                f"Realistic police forensic pencil sketch portrait of a person, "
+                f"detailed graphite drawing on white paper, "
+                f"front-facing mugshot style, neutral expression, "
+                f"with the following description: {feature_text}. "
+                f"Black and white pencil sketch, high detail, professional forensic artist style, "
+                f"clean white background, no color, no watermark"
             )
 
             print(f"[AI Sketch] Prompt: {prompt[:120]}...")
-            img_bytes, provider, model = _generate_ai_sketch_image(prompt, width=512, height=512)
-            print(f"[AI Sketch] Received image from {provider}/{model}: {len(img_bytes)} bytes")
+            img_bytes, provider = generate_ai_image(prompt, width=512, height=512)
+            print(f"[AI Sketch] Received image from {provider}: {len(img_bytes)} bytes")
         else:
             # ----- Traditional OpenCV path -----
             image = Image.open(image_file)
@@ -491,9 +442,12 @@ def image_to_sketch(request):
 def compose_face_from_features(request):
     """
     Compose a face from selected features using AI image generation.
-    Builds a descriptive prompt from feature names and generates a
-    realistic forensic-style pencil sketch with provider fallback.
+    Builds a descriptive prompt from the feature names and calls
+    the configured AI service (HuggingFace or Pollinations) to generate
+    a realistic forensic-style pencil sketch.
     """
+    from urllib.parse import quote
+
     try:
         selected_features = request.data.get('features', {})
 
@@ -560,25 +514,20 @@ def compose_face_from_features(request):
             notes_text = f"Additional distinguishing features: {additional_notes}. "
 
         prompt = (
-            f"Criminal forensic composite sketch, "
-            f"single front-facing head and shoulders portrait on white paper, "
-            f"all shading done exclusively with visible hatching and cross-hatching pencil lines, "
-            f"no smooth shading anywhere, "
-            f"every shadow area built up from overlapping sets of parallel pencil strokes at different angles, "
-            f"skin tones rendered with sparse fine hatching lines, "
-            f"darker areas like under the jaw and eye sockets use dense multi-layered cross-hatched pencil strokes, "
-            f"forehead and cheeks shaded with light widely-spaced diagonal hatch marks, "
-            f"hair drawn as individual grouped pencil strokes, "
-            f"looking straight ahead, neutral expression, "
+            f"Realistic police forensic pencil sketch portrait of a person, "
+            f"detailed graphite drawing on white paper, "
+            f"front-facing mugshot style, neutral expression, "
             f"{person_text}"
-            f"facial features: {feature_text}. "
+            f"with the following facial features: {feature_text}. "
             f"{notes_text}"
-            f"Monochrome graphite pencil only, white background"
+            f"Black and white pencil sketch, high detail, professional forensic artist style, "
+            f"clean white background, no color, no watermark"
         )
 
+        # --- Call AI image generation service ----
         print(f"[AI Compose] Prompt: {prompt[:120]}...")
-        img_bytes, provider, model = _generate_ai_sketch_image(prompt, width=512, height=512)
-        print(f"[AI Compose] Received image from {provider}/{model}: {len(img_bytes)} bytes")
+        img_bytes, provider = generate_ai_image(prompt, width=512, height=512)
+        print(f"[AI Compose] Received image from {provider}: {len(img_bytes)} bytes")
 
         # --- Upload to S3 ----
         from django.core.files.uploadedfile import InMemoryUploadedFile
