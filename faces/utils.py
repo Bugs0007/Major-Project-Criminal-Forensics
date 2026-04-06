@@ -1,11 +1,23 @@
 import boto3
-import face_recognition
 import numpy as np
 from django.conf import settings
 from PIL import Image
 import io
 import uuid
 from botocore.exceptions import ClientError
+
+try:
+    import face_recognition
+except Exception:
+    face_recognition = None
+
+
+def _require_face_recognition():
+    if face_recognition is None:
+        raise RuntimeError(
+            "face-recognition dependencies are not installed on this deployment. "
+            "Install face-recognition and dlib to enable upload/search face matching endpoints."
+        )
 
 
 def upload_to_s3(file, filename=None):
@@ -53,6 +65,8 @@ def get_face_encoding(image_file):
     Returns: numpy array of face encoding or None if no face found
     """
     try:
+        _require_face_recognition()
+
         # Load image
         image = face_recognition.load_image_file(image_file)
         
@@ -77,6 +91,8 @@ def calculate_similarity(encoding1, encoding2):
     Calculate similarity percentage between two face encodings
     Returns: similarity score (0-100)
     """
+    _require_face_recognition()
+
     # face_recognition.face_distance returns distance (0-1)
     # where 0 = identical, 1 = completely different
     distance = face_recognition.face_distance([encoding1], encoding2)[0]
@@ -91,6 +107,8 @@ def compare_faces(known_encoding, test_encoding, tolerance=None):
     """
     Compare two faces and return if they match
     """
+    _require_face_recognition()
+
     if tolerance is None:
         tolerance = settings.FACE_RECOGNITION_TOLERANCE
     

@@ -1,0 +1,5 @@
+# Optional heavy ML dependencies.
+# Install only in environments where native builds / large wheels are acceptable.
+face-recognition==1.3.0
+torch==2.1.0
+torchvision==0.16.0
