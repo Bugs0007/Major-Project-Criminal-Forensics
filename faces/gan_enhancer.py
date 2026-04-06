@@ -1,9 +1,14 @@
-import torch
-import torch.nn as nn
 import numpy as np
 import cv2
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
+
+try:
+    import torch
+    import torch.nn as nn
+except Exception:
+    torch = None
+    nn = None
 
 
 class GANEnhancer:
@@ -20,7 +25,7 @@ class GANEnhancer:
             model_path: Path to pre-trained model weights
             device: 'cpu' or 'cuda'
         """
-        self.device = torch.device(device)
+        self.device = torch.device(device) if torch is not None else 'cpu'
         self.model = None
         self.model_loaded = False
         
@@ -29,6 +34,10 @@ class GANEnhancer:
     
     def _load_model(self, model_path: str):
         """Load pre-trained GAN model"""
+        if torch is None:
+            self.model_loaded = False
+            return
+
         try:
             # This is a placeholder - actual implementation depends on model choice
             # For APDrawingGAN or similar
@@ -49,7 +58,7 @@ class GANEnhancer:
         Returns:
             Enhanced sketch
         """
-        if not self.model_loaded:
+        if torch is None or not self.model_loaded:
             # Fallback to non-GAN enhancement
             return self._fallback_enhancement(sketch)
         
@@ -70,8 +79,11 @@ class GANEnhancer:
             print(f"GAN enhancement failed: {e}, using fallback")
             return self._fallback_enhancement(sketch)
     
-    def _preprocess(self, image: np.ndarray) -> torch.Tensor:
+    def _preprocess(self, image: np.ndarray) -> Any:
         """Preprocess image for GAN input"""
+        if torch is None:
+            raise RuntimeError("torch is not available")
+
         # Resize to model input size (typically 512x512)
         resized = cv2.resize(image, (512, 512))
         
@@ -87,7 +99,7 @@ class GANEnhancer:
         
         return tensor.to(self.device)
     
-    def _postprocess(self, output: torch.Tensor) -> np.ndarray:
+    def _postprocess(self, output: Any) -> np.ndarray:
         """Convert GAN output back to image"""
         # Remove batch dimension
         output = output.squeeze(0)
@@ -133,7 +145,7 @@ def get_gan_enhancer(model_path: Optional[str] = None) -> GANEnhancer:
     global _gan_enhancer_instance
     
     if _gan_enhancer_instance is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = 'cuda' if (torch is not None and torch.cuda.is_available()) else 'cpu'
         _gan_enhancer_instance = GANEnhancer(model_path, device)
     
     return _gan_enhancer_instance
