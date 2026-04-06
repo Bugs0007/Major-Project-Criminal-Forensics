@@ -6,11 +6,25 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _get_list_env(name, default=None):
+    value = os.getenv(name)
+    if value is None:
+        return default or []
+    return [item.strip() for item in value.split(',') if item.strip()]
+
 SECRET_KEY = 'django-insecure-your-secret-key-change-this-in-production'
 
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+ALLOWED_HOSTS = _get_list_env(
+    'ALLOWED_HOSTS',
+    [
+        'localhost',
+        '127.0.0.1',
+        'major-project-criminal-forensics.onrender.com',
+    ],
+)
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -95,12 +109,23 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS Settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+CORS_ALLOWED_ORIGINS = _get_list_env(
+    'CORS_ALLOWED_ORIGINS',
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://major-project-criminal-forensics.onrender.com",
+    ],
+)
 
 CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = _get_list_env(
+    'CSRF_TRUSTED_ORIGINS',
+    [
+        "https://major-project-criminal-forensics.onrender.com",
+    ],
+)
 
 # REST Framework Settings
 REST_FRAMEWORK = {
