@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,9 +14,40 @@ def _get_list_env(name, default=None):
         return default or []
     return [item.strip() for item in value.split(',') if item.strip()]
 
-SECRET_KEY = 'django-insecure-your-secret-key-change-this-in-production'
+def _database_config_from_env():
+    database_url = os.getenv('DATABASE_URL')
+    if not database_url:
+        return {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('DB_NAME', 'face_matching_db'),
+            'USER': os.getenv('DB_USER', 'postgres'),
+            'PASSWORD': os.getenv('DB_PASSWORD', 'your_password'),
+            'HOST': os.getenv('DB_HOST', 'localhost'),
+            'PORT': os.getenv('DB_PORT', '5432'),
+        }
+
+    parsed = urlparse(database_url)
+    engine_map = {
+        'postgres': 'django.db.backends.postgresql',
+        'postgresql': 'django.db.backends.postgresql',
+        'pgsql': 'django.db.backends.postgresql',
+    }
+
+    return {
+        'ENGINE': engine_map.get(parsed.scheme, 'django.db.backends.postgresql'),
+        'NAME': parsed.path.lstrip('/'),
+        'USER': parsed.username or '',
+        'PASSWORD': parsed.password or '',
+        'HOST': parsed.hostname or '',
+        'PORT': str(parsed.port or '5432'),
+    }
 
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
+
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-dev-only-key')
+if not DEBUG and SECRET_KEY == 'django-insecure-dev-only-key':
+    raise ValueError('SECRET_KEY must be set when DEBUG=False')
+
 
 ALLOWED_HOSTS = _get_list_env(
     'ALLOWED_HOSTS',
@@ -23,6 +55,7 @@ ALLOWED_HOSTS = _get_list_env(
         'localhost',
         '127.0.0.1',
         'major-project-criminal-forensics.onrender.com',
+        'major-project-criminal-forensics-face-match-1fmg0f5hp.vercel.app',
     ],
 )
 
@@ -75,14 +108,7 @@ WSGI_APPLICATION = 'face_matching.wsgi.application'
 
 # Database
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'face_matching_db'),
-        'USER': os.getenv('DB_USER', 'postgres'),
-        'PASSWORD': os.getenv('DB_PASSWORD', 'your_password'),
-        'HOST': os.getenv('DB_HOST', 'localhost'),
-        'PORT': os.getenv('DB_PORT', '5432'),
-    }
+    'default': _database_config_from_env()
 }
 
 # Password validation
@@ -115,6 +141,7 @@ CORS_ALLOWED_ORIGINS = _get_list_env(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "https://major-project-criminal-forensics.onrender.com",
+        "https://major-project-criminal-forensics-face-match-1fmg0f5hp.vercel.app",
     ],
 )
 
@@ -124,6 +151,7 @@ CSRF_TRUSTED_ORIGINS = _get_list_env(
     'CSRF_TRUSTED_ORIGINS',
     [
         "https://major-project-criminal-forensics.onrender.com",
+        "https://major-project-criminal-forensics-face-match-1fmg0f5hp.vercel.app",
     ],
 )
 
