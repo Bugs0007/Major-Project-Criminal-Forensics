@@ -16,3 +16,4 @@ torch==2.1.0
 torchvision==0.16.0
 scikit-image==0.22.0
 requests==2.32.3
+gunicorn==22.0.0
