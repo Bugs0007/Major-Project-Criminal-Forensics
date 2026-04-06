@@ -41,6 +41,20 @@ def _to_bool(value, default=False):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _safe_optional_encoding(image_bytes):
+    """
+    Try to compute a face encoding for sketch outputs without failing the
+    whole request when native face-recognition dependencies are unavailable.
+    """
+    try:
+        encoding_array = get_face_encoding(io.BytesIO(image_bytes))
+        if encoding_array is None:
+            return None, None
+        return encoding_array.tolist(), None
+    except Exception as exc:
+        return None, str(exc)
+
+
 def generate_ai_image(prompt, width=512, height=512):
     """
     Generate an image using the configured AI provider.
@@ -408,10 +422,9 @@ def image_to_sketch(request):
 
         # ----- Optionally get face encoding -----
         encoding = None
+        encoding_error = None
         if _to_bool(request.data.get('get_encoding'), default=False):
-            encoding_array = get_face_encoding(io.BytesIO(img_bytes))
-            if encoding_array is not None:
-                encoding = encoding_array.tolist()
+            encoding, encoding_error = _safe_optional_encoding(img_bytes)
 
         return Response(
             {
@@ -424,6 +437,7 @@ def image_to_sketch(request):
                 'super_resolution_applied': use_super_resolution and not use_ai,
                 'deblur_applied': is_blurry and not use_ai,
                 'encoding': encoding,
+                'encoding_error': encoding_error,
             },
             status=status.HTTP_200_OK,
         )
@@ -547,10 +561,9 @@ def compose_face_from_features(request):
 
         # --- Optionally get face encoding ----
         encoding = None
+        encoding_error = None
         if _to_bool(request.data.get('get_encoding'), default=False):
-            encoding_array = get_face_encoding(io.BytesIO(img_bytes))
-            if encoding_array is not None:
-                encoding = encoding_array.tolist()
+            encoding, encoding_error = _safe_optional_encoding(img_bytes)
 
         return Response(
             {
@@ -559,6 +572,7 @@ def compose_face_from_features(request):
                 'ai_generated': True,
                 'prompt': prompt,
                 'encoding': encoding,
+                'encoding_error': encoding_error,
             },
             status=status.HTTP_200_OK
         )
